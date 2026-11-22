@@ -793,16 +793,16 @@ public final class FlightRunner {
         } else if (firstRocketPending) {
             // the first rocket must work: fire it, check the speed, try again if nothing happened
             if (rocketCheckAt == 0) {
-                if (ticks - lastRocket >= 5) {
-                    if (rocketTries >= 3) {
+                if (ticks - lastRocket >= 12) {
+                    if (rocketTries >= 5) {
                         debug(client, "First rocket failed verification after 3 attempts; stopping flight");
-                        stop(client, "Auto Elytra: the first rocket does nothing (3 tries) - check your hotbar rockets");
+                        stop(client, "Auto Elytra: the first rocket does nothing (5 tries) - check your hotbar rockets");
                         return;
                     }
                     rocketSpeedBefore = speed;
                     rocketTries++;
                     debug(client, "First rocket attempt " + rocketTries + "/3 at " + fmt(p.getX()) + "," + fmt(p.getY()) + "," + fmt(p.getZ()));
-                    if (useRocket(client)) rocketCheckAt = ticks + 6;
+                    if (useRocket(client)) rocketCheckAt = ticks + 12;
                 }
             } else if (ticks >= rocketCheckAt) {
                 rocketCheckAt = 0;
@@ -904,8 +904,17 @@ public final class FlightRunner {
     }
 
     private static void enterLand() {
-        state = State.LAND;
         MinecraftClient client = MinecraftClient.getInstance();
+        // never begin the descent from below the ship: climb (rockets) until we are well above it
+        if (shipLanding && client.player != null) {
+            double anchor = frameTarget != null && !frameTarget.isRemoved() ? frameTarget.getY() : shipAnchorY;
+            if (!Double.isNaN(anchor) && client.player.getY() < anchor + 10) {
+                if (ticks % 40 == 0) debug(client, "Landing delayed: climbing first (playerY=" + fmt(client.player.getY())
+                        + ", needs Y>=" + fmt(anchor + 10) + ")");
+                return;
+            }
+        }
+        state = State.LAND;
         if (client.player != null) debug(client, "Landing phase entered: player=" + fmt(client.player.getX())
                 + "," + fmt(client.player.getY()) + "," + fmt(client.player.getZ())
                 + ", roofY=" + fmt(shipRoofY) + ", destination=" + (target == null ? "none" : target.name));
@@ -1186,6 +1195,9 @@ public final class FlightRunner {
      * A single raised mast, decoration, or frame must not pull the landing height upward.
      */
     private static double estimateShipRoofY(MinecraftClient client, double x, double z, int radius) {
+        // measured on real ships: the roof is always frame height + 5.5 to 6.5
+        double anchor = frameTarget != null && !frameTarget.isRemoved() ? frameTarget.getY() : shipAnchorY;
+        if (!Double.isNaN(anchor)) return anchor + 6.0;
         int side = radius * 2 + 1;
         int[] tops = new int[side * side];
         int count = 0;

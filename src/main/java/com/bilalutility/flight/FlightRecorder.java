@@ -4,7 +4,12 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
+import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.entity.mob.ShulkerEntity;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 
@@ -34,7 +39,14 @@ public final class FlightRecorder {
     private static long teachStart;
     private static double fx, fy, fz;
     private static int lastElytra = -1;
-    private static boolean lastAttack, lastFrameHas = true;
+    private static boolean lastAttack, lastFrameHas = true, lastUse, lastLevitation;
+    private static int lastSlot = -1;
+    private static String lastHeld = "", lastScreen = "";
+    private static BlockPos lastTarget;
+    private static String lastTargetId = "";
+    private static double lastPx, lastPy, lastPz;
+    private static float lastHealth = -1;
+    private static long glideSince = -1;
 
     private FlightRecorder() {}
 
@@ -76,7 +88,23 @@ public final class FlightRecorder {
         lastElytra = countElytra(client.player);
         lastAttack = false;
         lastFrameHas = true;
+        lastSlot = -1;
+        lastHeld = "";
+        lastScreen = "";
+        lastTarget = null;
+        lastUse = false;
+        lastLevitation = false;
+        lastHealth = client.player.getHealth();
+        lastPx = client.player.getX();
+        lastPy = client.player.getY();
+        lastPz = client.player.getZ();
+        glideSince = -1;
         line("TEACH_START frame=" + f(fx) + "," + f(fy) + "," + f(fz) + " elytraInInventory=" + lastElytra);
+        for (ItemFrameEntity fr : client.world.getEntitiesByClass(ItemFrameEntity.class,
+                new Box(fx - 3, fy - 3, fz - 3, fx + 3, fy + 3, fz + 3), e -> !e.isRemoved())) {
+            line("FRAME_FACING dir=" + fr.getHorizontalFacing() + " pos=" + f(fr.getX()) + "," + f(fr.getY()) + "," + f(fr.getZ()));
+        }
+        inventoryLine(client.player);
         dumpMap(client);
     }
 
@@ -122,14 +150,95 @@ public final class FlightRecorder {
                 lastFrameHas = has;
             }
         }
+        trackEverything(client, p, t, attack);
         if (t % 4 == 0) {
             line("T t=" + t + " pos=" + f(p.getX()) + "," + f(p.getY()) + "," + f(p.getZ())
                     + " yaw=" + f(p.getYaw()) + " pitch=" + f(p.getPitch())
                     + " gnd=" + p.isOnGround() + " glide=" + p.isGliding() + " keys=" + keys(client)
                     + " toFrame=" + f(Math.hypot(fx - p.getX(), fz - p.getZ())) + "," + f(fy - p.getY()));
         }
-        if (p.isGliding() && elytra > 0 && t > 40) endTeach("player took off");
+        if (p.isGliding() && elytra > 0 && t > 40 && glideSince < 0) {
+            glideSince = t;
+            line("GLIDE_START t=" + t + " (recording 5 more seconds of the take off)");
+        }
+        if (glideSince >= 0 && t > glideSince + 100) endTeach("player took off");
         else if (t > 20 * 60 * 5) endTeach("timeout 5 min");
+    }
+
+    /** Everything else the player does: hotbar, item use (pearl, rocket), mining, teleports, damage, effects, screens. */
+    private static void trackEverything(MinecraftClient client, ClientPlayerEntity p, long t, boolean attack) {
+        int slot = p.getInventory().getSelectedSlot();
+        String held = Registries.ITEM.getId(p.getMainHandStack().getItem()).toString();
+        if (slot != lastSlot || !held.equals(lastHeld)) {
+            line("HOTBAR t=" + t + " slot=" + slot + " held=" + held);
+            lastSlot = slot;
+            lastHeld = held;
+        }
+        boolean use = client.options.useKey.isPressed();
+        if (use && !lastUse) {
+            line("USE t=" + t + " item=" + held + " yaw=" + f(p.getYaw()) + " pitch=" + f(p.getPitch()) + " rel=" + rel(p.getX(), p.getY(), p.getZ()));
+        }
+        lastUse = use;
+
+        // mining: which block is being broken, and when it is gone
+        if (attack && client.crosshairTarget instanceof BlockHitResult bhr && bhr.getType() == HitResult.Type.BLOCK) {
+            BlockPos bp = bhr.getBlockPos();
+            if (!bp.equals(lastTarget)) {
+                lastTarget = bp.toImmutable();
+                lastTargetId = Registries.BLOCK.getId(client.world.getBlockState(bp).getBlock()).toString();
+                line("MINE_START t=" + t + " block=" + lastTargetId + " rel=" + rel(bp.getX() + 0.5, bp.getY(), bp.getZ() + 0.5)
+                        + " held=" + held + " yaw=" + f(p.getYaw()) + " pitch=" + f(p.getPitch()));
+            }
+        }
+        if (lastTarget != null && client.world.getBlockState(lastTarget).isAir()) {
+            line("BROKE t=" + t + " block=" + lastTargetId + " rel=" + rel(lastTarget.getX() + 0.5, lastTarget.getY(), lastTarget.getZ() + 0.5));
+            lastTarget = null;
+        }
+
+        // pearl / any teleport
+        double jump = Math.sqrt(sq(p.getX() - lastPx) + sq(p.getY() - lastPy) + sq(p.getZ() - lastPz));
+        if (jump > 6) line("TELEPORT t=" + t + " from=" + rel(lastPx, lastPy, lastPz) + " to=" + rel(p.getX(), p.getY(), p.getZ()));
+        lastPx = p.getX();
+        lastPy = p.getY();
+        lastPz = p.getZ();
+
+        boolean lev = p.hasStatusEffect(StatusEffects.LEVITATION);
+        if (lev != lastLevitation) {
+            line("LEVITATION t=" + t + " " + lev + " rel=" + rel(p.getX(), p.getY(), p.getZ()));
+            lastLevitation = lev;
+        }
+        float hp = p.getHealth();
+        if (lastHealth >= 0 && hp < lastHealth - 0.01f) line("HURT t=" + t + " hp=" + f(hp) + " lost=" + f(lastHealth - hp));
+        lastHealth = hp;
+
+        String screen = client.currentScreen == null ? "" : client.currentScreen.getClass().getSimpleName();
+        if (!screen.equals(lastScreen)) {
+            line("SCREEN t=" + t + " " + (screen.isEmpty() ? "closed" : screen));
+            lastScreen = screen;
+        }
+        if (t % 20 == 0) {
+            for (ShulkerEntity sh : client.world.getEntitiesByClass(ShulkerEntity.class,
+                    new Box(fx - 15, fy - 15, fz - 15, fx + 15, fy + 15, fz + 15), e -> !e.isRemoved())) {
+                line("SHULKER t=" + t + " rel=" + rel(sh.getX(), sh.getY(), sh.getZ()));
+            }
+        }
+        if (t % 100 == 0) inventoryLine(p);
+    }
+
+    private static void inventoryLine(ClientPlayerEntity p) {
+        int rockets = 0, pearls = 0, pickaxes = 0;
+        for (int i = 0; i < 36; i++) {
+            var st = p.getInventory().getStack(i);
+            if (st.isOf(Items.FIREWORK_ROCKET)) rockets += st.getCount();
+            else if (st.isOf(Items.ENDER_PEARL)) pearls += st.getCount();
+            else if (Registries.ITEM.getId(st.getItem()).getPath().endsWith("_pickaxe")) pickaxes++;
+        }
+        line("INV rockets=" + rockets + " pearls=" + pearls + " pickaxes=" + pickaxes + " elytra=" + countElytra(p));
+    }
+
+    /** Position relative to the frame, so ships can be compared later. */
+    private static String rel(double x, double y, double z) {
+        return "(" + f(x - fx) + "," + f(y - fy) + "," + f(z - fz) + ")";
     }
 
     /** 21x21 map around the frame, 6 height levels, '#' = solid, '.' = air. Rows go north to south. */
