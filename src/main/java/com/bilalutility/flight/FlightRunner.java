@@ -81,6 +81,14 @@ public final class FlightRunner {
     private static final double[] SHIP_SHAPE = {6.40, 19.21, 20.35};
     private static final double SHAPE_TOLERANCE = 1.5;
 
+    private static final double SHIP_LAND_RADIUS = 10;   // touchdown this close to the elytra shulker = on the ship roof
+
+    // ship detection / landing state of the current leg
+    private static boolean shipLanding;
+    private static int verdictStreak, recoveryRockets;
+    private static String lastVerdictSeen = "";
+    private static String lastScanNote = "";
+
     private static int alertLeft;
 
     // numbers for the HUD
@@ -199,6 +207,11 @@ public final class FlightRunner {
         scoutDone = false;
         orbiting = false;
         spotSet = false;
+        shipLanding = false;
+        verdictStreak = 0;
+        lastVerdictSeen = "";
+        lastScanNote = "";
+        recoveryRockets = 0;
         frameTarget = null;
         lastShulkerCount = 0;
         lastFrameCount = 0;
@@ -486,6 +499,8 @@ public final class FlightRunner {
             double alt = p.getY();
             if (island) {
                 if (dist <= landStart(alt - refY)) enterLand();
+            } else if (shipLanding) {
+                if (dist <= landStart(alt - refY)) enterLand();
             } else {
                 boolean loaded = chunkLoaded(client, tx, tz);
                 boolean scouting = FlightConfig.hunt && (FlightConfig.scout || FlightConfig.useShulkers)
@@ -493,36 +508,32 @@ public final class FlightRunner {
                 if (scouting) {
                     chunkSeen = loaded ? chunkSeen + 1 : 0;
                     if (chunkSeen >= 10 && ticks % 5 == 0) {
-                        // A real elytra frame is always a positive result, even if shulkers are missing.
-                        if (FlightConfig.scout) {
-                            ItemFrameEntity f = findElytraFrame(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
-                            if (f != null) {
-                                frameTarget = f;
-                                shipRoofY = estimateShipRoofY(client, f.getX(), f.getZ(), 12);
-                                refY = Double.isNaN(shipRoofY) ? Math.floor(f.getY()) : shipRoofY;
-                                scoutDone = true;
-                                debug(client, "Elytra frame found at " + target.name + " frame=" + fmt(f.getX()) + "," + fmt(f.getY()) + "," + fmt(f.getZ()) + " roofY=" + fmt(shipRoofY));
-                                msg(client, "Auto Elytra: elytra frame seen at " + target.name + ", going down");
-                            }
-                        }
-                        if (!scoutDone && FlightConfig.useShulkers) {
+                        if (FlightConfig.useShulkers) {
                             ShulkerScan scan = scanShulkers(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
                             rememberScan(scan);
                             lastFrameCount = countFrames(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
+                            verdictStreak = scan.verdict.equals(lastVerdictSeen) ? verdictStreak + 1 : 1;
+                            lastVerdictSeen = scan.verdict;
+                            double shipDist = Math.hypot(scan.centerX - p.getX(), scan.centerZ - p.getZ());
                             debug(client, "Air scan: shulkers=" + scan.shulkers.size() + ", verdict=" + scan.verdict
-                                    + ", frames=" + lastFrameCount + ", radius=" + FlightConfig.searchRadius);
-                            if (scan.verdict.equals("untouched")) {
-                                spotX = scan.centerX;
-                                spotZ = scan.centerZ;
-                                shipRoofY = estimateShipRoofY(client, scan.centerX, scan.centerZ, 12);
-                                refY = Double.isNaN(shipRoofY) ? scan.centerY : shipRoofY;
-                                spotSet = true;
-                                scoutDone = true;
-                                debug(client, "Untouched ship shape at " + target.name + "; roofY=" + fmt(shipRoofY) + ", landing center=" + fmt(spotX) + "," + fmt(spotZ));
-                                msg(client, "Auto Elytra: untouched ship shape found at " + target.name + ", going down");
-                            } else if (scan.verdict.equals("looted")) {
-                                skipPoint(client, "looted", "looks looted (shulker shape does not match)");
-                                return;
+                                    + " x" + verdictStreak + ", " + lastScanNote + ", frames=" + lastFrameCount
+                                    + ", shipDist=" + fmt(shipDist));
+                            // the same answer 8 scans in a row (about 2 s) before it is trusted
+                            if (verdictStreak >= 8) {
+                                if (scan.verdict.equals("untouched")) {
+                                    setShipLanding(client, scan.centerX, scan.centerY, scan.centerZ, "third shulker in place");
+                                } else if (scan.verdict.equals("looted") && shipDist <= 120) {
+                                    skipPoint(client, "looted", "looks looted (" + lastScanNote + ")");
+                                    return;
+                                }
+                            }
+                        }
+                        // An elytra in a frame is a definite positive (the server only shows it when we are close).
+                        if (!scoutDone && FlightConfig.scout) {
+                            ItemFrameEntity f = findElytraFrame(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
+                            if (f != null) {
+                                frameTarget = f;
+                                setShipLanding(client, f.getX(), f.getY(), f.getZ(), "elytra frame seen");
                             }
                         }
                     }
@@ -560,12 +571,17 @@ public final class FlightRunner {
 
         float pitch;
         if (state == State.LAND) {
-            if (!Double.isNaN(shipRoofY) && p.getY() < shipRoofY + 8 && !p.isOnGround()) {
-                if (ticks - lastRocket > 25 && speed < 2.0) {
-                    debug(client, "Below safe roof approach altitude: playerY=" + fmt(p.getY()) + ", roofY=" + fmt(shipRoofY) + "; firing recovery rocket");
+            // Recovery only when we are really below the roof, or still far out and low. On the final
+            // approach (inside 25 blocks) we must be allowed to come down to the roof.
+            if (!Double.isNaN(shipRoofY) && !p.isOnGround()
+                    && (p.getY() < shipRoofY - 1.5 || (dist > 25 && p.getY() < shipRoofY + 8))) {
+                if (ticks - lastRocket > 40 && speed < 2.0 && recoveryRockets < 2) {
+                    recoveryRockets++;
+                    debug(client, "Below the roof approach: playerY=" + fmt(p.getY()) + ", roofY=" + fmt(shipRoofY)
+                            + "; recovery rocket " + recoveryRockets + "/2");
                     useRocket(client);
                 }
-                p.setYaw((float) Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())));
+                turnYaw(p, Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())), 4f);
                 p.setPitch(-18f);
                 return;
             }
@@ -574,27 +590,13 @@ public final class FlightRunner {
             double above = Double.isNaN(gb) ? alt : p.getY() - gb;            // height over the ground below
             double yawToSpot = Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
 
-            // arrived too high to come straight down: circle the spot and lose height first
-            if (!orbiting && dist < ORBIT_R + 15 && alt > dist * 0.25 + 20) {
-                orbiting = true;
-                orbitDir = Math.random() < 0.5 ? 1 : -1;
-            }
-            if (orbiting && alt < 14) orbiting = false;
-
-            if (orbiting) {
-                double off = clamp(90 + (ORBIT_R - dist) * 2.5, 40, 140);
-                p.setYaw(MathHelper.wrapDegrees((float) (yawToSpot + orbitDir * off)));
-                pitch = (float) clamp((alt - 14) * 0.4, 6, 30);
-                if (speed > 2.4) pitch = Math.min(pitch, 6f);
-                p.setPitch(pitch);
-                return;
-            }
-
             if (dist > 25) {
                 double want = dist * 0.2 + 3;                                  // gentle slope down to the spot
                 pitch = (float) clamp((alt - want) * 0.6, -6, 40);
+                if (speed > 2.6 && pitch > 10) pitch = 10f;                     // do not nose-dive
             } else if (above > 12) {
                 pitch = (float) clamp((above - 12) * 0.8 + 6, 6, 30);          // last part of the descent
+                if (speed > 2.6 && pitch > 10) pitch = 10f;
             } else if (above > 4) {
                 pitch = speed > 1.4 ? -6f : 8f;                                // flare: bleed speed
             } else {
@@ -603,7 +605,7 @@ public final class FlightRunner {
             // low and still flying for a long time: force it down
             nearGroundTicks = above < 5 ? nearGroundTicks + 1 : 0;
             if (nearGroundTicks > 100) pitch = 35f;
-            if (dist > 3) p.setYaw((float) yawToSpot);
+            if (dist > 3) turnYaw(p, yawToSpot, 4f);            // smooth turn, no camera snapping
             p.setPitch(pitch);
             return;
         }
@@ -633,8 +635,29 @@ public final class FlightRunner {
             useRocket(client);
         }
         double dx = tx - p.getX(), dz = tz - p.getZ();
-        p.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
+        turnYaw(p, Math.toDegrees(Math.atan2(-dx, dz)), 8f);
         p.setPitch(pitch);
+    }
+
+    /** Turns the camera towards a heading by at most maxStep degrees per tick. */
+    private static void turnYaw(ClientPlayerEntity p, double desired, float maxStep) {
+        float cur = p.getYaw();
+        float diff = MathHelper.wrapDegrees((float) desired - cur);
+        p.setYaw(cur + Math.max(-maxStep, Math.min(maxStep, diff)));
+    }
+
+    /** A ship is confirmed: the landing centre is the third shulker (or the elytra frame); land on the roof above it. */
+    private static void setShipLanding(MinecraftClient client, double x, double y, double z, String why) {
+        spotX = x;
+        spotZ = z;
+        spotSet = true;
+        shipLanding = true;
+        scoutDone = true;
+        shipRoofY = estimateShipRoofY(client, x, z, 3);
+        refY = Double.isNaN(shipRoofY) ? y + 4 : shipRoofY;
+        debug(client, "Ship confirmed (" + why + "): landing centre=" + fmt(x) + "," + fmt(z)
+                + ", shulker/frame y=" + fmt(y) + ", roofY=" + fmt(shipRoofY));
+        msg(client, "Auto Elytra: untouched ship at " + target.name + " (" + why + "), going down");
     }
 
     private static void enterLand() {
@@ -645,6 +668,7 @@ public final class FlightRunner {
                 + ", roofY=" + fmt(shipRoofY) + ", destination=" + (target == null ? "none" : target.name));
         orbiting = false;
         nearGroundTicks = 0;
+        recoveryRockets = 0;
     }
 
     /** Over the void: look around the point for solid ground and use the nearest piece as the landing spot. */
@@ -676,10 +700,10 @@ public final class FlightRunner {
         ClientPlayerEntity p = client.player;
         boolean onFrame = frameTarget != null && !frameTarget.isRemoved();
         if (onFrame && Double.isNaN(shipRoofY)) {
-            shipRoofY = estimateShipRoofY(client, frameTarget.getX(), frameTarget.getZ(), 12);
+            shipRoofY = estimateShipRoofY(client, frameTarget.getX(), frameTarget.getZ(), 3);
         }
-        double radius = onFrame ? FRAME_LAND_RADIUS : FlightConfig.landRadius;
-        boolean expectedShip = FlightConfig.hunt && (onFrame || !Double.isNaN(shipRoofY));
+        double radius = (onFrame || shipLanding) ? SHIP_LAND_RADIUS : FlightConfig.landRadius;
+        boolean expectedShip = FlightConfig.hunt && (onFrame || shipLanding);
         boolean onShipRoof = !expectedShip || (!Double.isNaN(shipRoofY)
                 && p.getY() >= shipRoofY - 1.5 && dist <= radius);
         debug(client, "Touchdown check: position=" + fmt(p.getX()) + "," + fmt(p.getY()) + "," + fmt(p.getZ())
@@ -700,7 +724,7 @@ public final class FlightRunner {
             ItemFrameEntity f = findElytraFrame(client, p.getX(), p.getZ(), FlightConfig.searchRadius);
             if (f != null) {
                 frameTarget = f;
-                shipRoofY = estimateShipRoofY(client, f.getX(), f.getZ(), 12);
+                shipRoofY = estimateShipRoofY(client, f.getX(), f.getZ(), 3);
                 if (Double.isNaN(shipRoofY) || p.getY() < shipRoofY - 1.5) {
                     refY = shipRoofY;
                     retryLanding(client, "elytra frame found, but touchdown was not confirmed on the ship roof");
@@ -714,7 +738,7 @@ public final class FlightRunner {
                 rememberScan(scan);
                 debug(client, "Close shulker check: count=" + scan.shulkers.size() + ", verdict=" + scan.verdict + ", frames=" + countFrames(client, target.x + .5, target.z + .5, FlightConfig.searchRadius));
                 if (scan.verdict.equals("untouched")) {
-                    shipRoofY = estimateShipRoofY(client, scan.centerX, scan.centerZ, 12);
+                    shipRoofY = estimateShipRoofY(client, scan.centerX, scan.centerZ, 3);
                     if (Double.isNaN(shipRoofY) || p.getY() < shipRoofY - 1.5) {
                         spotX = scan.centerX;
                         spotZ = scan.centerZ;
@@ -740,6 +764,10 @@ public final class FlightRunner {
                     enterPause(client);
                     return;
                 }
+            }
+            if (shipLanding) {
+                found(client, "landed on the roof above the third shulker");
+                return;
             }
             double possibleRoof = estimateShipRoofY(client, target.x + 0.5, target.z + 0.5, 12);
             if (!Double.isNaN(possibleRoof) && p.getY() < possibleRoof - 1.5) {
@@ -902,57 +930,68 @@ public final class FlightRunner {
         }
     }
 
-    /** Collect only shulkers the server has actually sent to this client. */
+    private static double dist3(net.minecraft.entity.Entity a, net.minecraft.entity.Entity b) {
+        double dx = a.getX() - b.getX(), dy = a.getY() - b.getY(), dz = a.getZ() - b.getZ();
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    /**
+     * Ship detection from the shulkers the server sent us.
+     *  - The two BACK shulkers (about 6.40 apart) mean "this is a ship".
+     *  - The third shulker (next to the elytra frame, about 19.21 / 20.35 from the back pair) decides:
+     *    in place = untouched, missing (killed) or moved (mined under it) = looted.
+     *  - Fewer than two shulkers, or no back pair = unknown (never "looted").
+     * The centre of an untouched ship is the third shulker (the landing spot).
+     */
     private static ShulkerScan scanShulkers(MinecraftClient client, double x, double z, double radius) {
         double bottom = client.world.getBottomY();
         Box box = new Box(x - radius, bottom, z - radius, x + radius, bottom + 400, z + radius);
         List<ShulkerEntity> found = client.world.getEntitiesByClass(ShulkerEntity.class, box,
                 e -> !e.isRemoved());
-        if (found.isEmpty()) return new ShulkerScan(found, "unknown", 0, 0, 0, Double.MAX_VALUE);
-        if (found.size() < 3) return new ShulkerScan(found, "looted", 0, 0, 0, Double.MAX_VALUE);
+        if (found.size() < 2) {
+            lastScanNote = "fewer than 2 shulkers loaded";
+            return new ShulkerScan(found, "unknown", 0, 0, 0, Double.MAX_VALUE);
+        }
 
-        // Try every triple. This also handles several nearby ships/cities: the best
-        // matching triple wins, instead of depending on entity-list order.
-        double best = Double.MAX_VALUE;
-        ShulkerEntity ba = null, bb = null, bc = null;
-        for (int i = 0; i < found.size() - 2; i++) {
-            for (int j = i + 1; j < found.size() - 1; j++) {
-                for (int k = j + 1; k < found.size(); k++) {
-                    ShulkerEntity a = found.get(i), b = found.get(j), c = found.get(k);
-                    double[] ds = {
-                            new Vec3d(a.getX(), a.getY(), a.getZ()).distanceTo(new Vec3d(b.getX(), b.getY(), b.getZ())),
-                            new Vec3d(a.getX(), a.getY(), a.getZ()).distanceTo(new Vec3d(c.getX(), c.getY(), c.getZ())),
-                            new Vec3d(b.getX(), b.getY(), b.getZ()).distanceTo(new Vec3d(c.getX(), c.getY(), c.getZ()))
-                    };
-                    java.util.Arrays.sort(ds);
-                    double error = Math.abs(ds[0] - SHIP_SHAPE[0])
-                            + Math.abs(ds[1] - SHIP_SHAPE[1])
-                            + Math.abs(ds[2] - SHIP_SHAPE[2]);
-                    if (error < best) {
-                        best = error;
-                        ba = a; bb = b; bc = c;
-                    }
+        ShulkerEntity pa = null, pb = null;
+        double bestPair = Double.MAX_VALUE;
+        for (int i = 0; i < found.size() - 1; i++) {
+            for (int j = i + 1; j < found.size(); j++) {
+                double err = Math.abs(dist3(found.get(i), found.get(j)) - SHIP_SHAPE[0]);
+                if (err <= SHAPE_TOLERANCE && err < bestPair) {
+                    bestPair = err;
+                    pa = found.get(i);
+                    pb = found.get(j);
                 }
             }
         }
-        if (ba != null) {
-            double[] ds = {
-                    new Vec3d(ba.getX(), ba.getY(), ba.getZ()).distanceTo(new Vec3d(bb.getX(), bb.getY(), bb.getZ())),
-                    new Vec3d(ba.getX(), ba.getY(), ba.getZ()).distanceTo(new Vec3d(bc.getX(), bc.getY(), bc.getZ())),
-                    new Vec3d(bb.getX(), bb.getY(), bb.getZ()).distanceTo(new Vec3d(bc.getX(), bc.getY(), bc.getZ()))
-            };
-            java.util.Arrays.sort(ds);
-            boolean matches = Math.abs(ds[0] - SHIP_SHAPE[0]) <= SHAPE_TOLERANCE
-                    && Math.abs(ds[1] - SHIP_SHAPE[1]) <= SHAPE_TOLERANCE
-                    && Math.abs(ds[2] - SHIP_SHAPE[2]) <= SHAPE_TOLERANCE;
-            if (matches) {
-                return new ShulkerScan(found, "untouched",
-                        (ba.getX() + bb.getX() + bc.getX()) / 3.0,
-                        (ba.getY() + bb.getY() + bc.getY()) / 3.0,
-                        (ba.getZ() + bb.getZ() + bc.getZ()) / 3.0, best);
+        if (pa == null) {
+            lastScanNote = "no back pair (6.4 apart) among " + found.size() + " shulkers";
+            return new ShulkerScan(found, "unknown", 0, 0, 0, Double.MAX_VALUE);
+        }
+        double pcx = (pa.getX() + pb.getX()) / 2, pcy = (pa.getY() + pb.getY()) / 2, pcz = (pa.getZ() + pb.getZ()) / 2;
+
+        ShulkerEntity third = null;
+        double bestThird = Double.MAX_VALUE;
+        boolean otherNearby = false;
+        for (ShulkerEntity c : found) {
+            if (c == pa || c == pb) continue;
+            double d1 = dist3(c, pa), d2 = dist3(c, pb);
+            if (Math.hypot(c.getX() - pcx, c.getZ() - pcz) <= 45) otherNearby = true;
+            double lo = Math.min(d1, d2), hi = Math.max(d1, d2);
+            double e1 = Math.abs(lo - SHIP_SHAPE[1]), e2 = Math.abs(hi - SHIP_SHAPE[2]);
+            if (e1 <= SHAPE_TOLERANCE && e2 <= SHAPE_TOLERANCE && e1 + e2 < bestThird) {
+                bestThird = e1 + e2;
+                third = c;
             }
         }
-        return new ShulkerScan(found, "looted", 0, 0, 0, best);
+        if (third != null) {
+            lastScanNote = "back pair + third in place (error " + fmt(bestThird) + ")";
+            return new ShulkerScan(found, "untouched", third.getX(), third.getY(), third.getZ(), bestThird);
+        }
+        lastScanNote = otherNearby ? "back pair found, third shulker moved (mined under it)"
+                : "back pair found, third shulker missing (killed)";
+        return new ShulkerScan(found, "looted", pcx, pcy, pcz, bestPair);
     }
 
     private static int countFrames(MinecraftClient client, double x, double z, double radius) {
@@ -981,7 +1020,7 @@ public final class FlightRunner {
         rememberScan(scan);
         lastFrameCount = frames;
         client.player.sendMessage(Text.literal("Auto Elytra debug: Shulkers " + scan.shulkers.size()
-                + " | Ship: " + scan.verdict + " | Frames " + frames
+                + " | Ship: " + scan.verdict + " (" + lastScanNote + ") | Frames " + frames
                 + " | radius " + FlightConfig.searchRadius), false);
         for (int i = 0; i < scan.shulkers.size(); i++) {
             ShulkerEntity sh = scan.shulkers.get(i);
