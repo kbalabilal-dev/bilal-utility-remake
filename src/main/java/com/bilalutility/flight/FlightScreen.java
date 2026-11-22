@@ -121,6 +121,11 @@ public class FlightScreen extends BilalScreen {
                 v -> v == 1 ? "wear chestplate" : "keep elytra on", FlightConfig::save,
                 "wear chestplate = swaps to a chestplate from your inventory at every stop and back to the elytra before taking off");
 
+        y += 24;
+        toggle(left, y, inner, "Ship landing: chestplate drop", () -> FlightConfig.shipLandingChestplateDrop,
+                v -> FlightConfig.shipLandingChestplateDrop = v, FlightConfig::save,
+                "On confirmed ships, safely swaps to your inventory chestplate above solid roof and drops onto it; otherwise uses normal landing");
+
         // ---- elytra hunting ----
         y += 34;
         section("Elytra hunting", y);

@@ -65,7 +65,9 @@ public final class FlightRunner {
     private static double rocketSpeedBefore;
 
     // current leg
-    private static int chunkSeen, landFails, nearGroundTicks, landingAttempts;
+    private static int chunkSeen, landFails, nearGroundTicks, landingAttempts, shipApproaches, goAroundTicks;
+    private static boolean shipDropActive;
+    private static long lastLandDebug;
     private static double shipRoofY = Double.NaN;
     private static long lastDebugHeartbeat;
     private static boolean scoutDone, orbiting, spotSet;
@@ -204,6 +206,10 @@ public final class FlightRunner {
         landingAttempts = 0;
         shipRoofY = Double.NaN;
         nearGroundTicks = 0;
+        shipApproaches = 0;
+        goAroundTicks = 0;
+        shipDropActive = false;
+        lastLandDebug = 0;
         scoutDone = false;
         orbiting = false;
         spotSet = false;
@@ -452,6 +458,20 @@ public final class FlightRunner {
         // ---- void protection: lost the glide while in the air
         if (!gliding && !p.isOnGround()) {
             double gb = groundBelow(client, p, 40);
+            if (state == State.LAND && shipDropActive) {
+                double roof = Double.isNaN(shipRoofY) ? refY : shipRoofY;
+                if (Double.isNaN(gb) || p.getY() - gb > 8 || p.getY() < roof - 10) {
+                    if (equipElytra(client)) {
+                        shipDropActive = false;
+                        debug(client, "Chestplate-drop safety net: elytra restored; re-glide");
+                        client.options.jumpKey.setPressed(ticks % 2 == 0);
+                        return;
+                    }
+                } else if (p.getY() - gb < 6) {
+                    client.options.jumpKey.setPressed(false);
+                    return;
+                }
+            }
             if (state == State.LAND && !Double.isNaN(gb) && p.getY() - gb < 6) {
                 client.options.jumpKey.setPressed(false);       // nearly down: just let it fall
                 return;
@@ -571,8 +591,8 @@ public final class FlightRunner {
 
         float pitch;
         if (state == State.LAND) {
-            // Recovery only when we are really below the roof, or still far out and low. On the final
-            // approach (inside 25 blocks) we must be allowed to come down to the roof.
+            // Recovery remains deliberately conservative: never rocket merely because we are
+            // below a ship while already close to its roof.
             if (!Double.isNaN(shipRoofY) && !p.isOnGround()
                     && (p.getY() < shipRoofY - 1.5 || (dist > 25 && p.getY() < shipRoofY + 8))) {
                 if (ticks - lastRocket > 40 && speed < 2.0 && recoveryRockets < 2) {
@@ -581,32 +601,99 @@ public final class FlightRunner {
                             + "; recovery rocket " + recoveryRockets + "/2");
                     useRocket(client);
                 }
-                turnYaw(p, Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())), 4f);
-                p.setPitch(-18f);
+                turnYaw(p, Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())), 6f);
+                p.setPitch(-8f);
                 return;
             }
-            double gb = groundBelow(client, p, 120);                          // real ground under us
-            double alt = p.getY() - refY;                                     // height over the landing spot
-            double above = Double.isNaN(gb) ? alt : p.getY() - gb;            // height over the ground below
-            double yawToSpot = Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
 
-            if (dist > 25) {
-                double want = dist * 0.2 + 3;                                  // gentle slope down to the spot
-                pitch = (float) clamp((alt - want) * 0.6, -6, 40);
-                if (speed > 2.6 && pitch > 10) pitch = 10f;                     // do not nose-dive
-            } else if (above > 12) {
-                pitch = (float) clamp((above - 12) * 0.8 + 6, 6, 30);          // last part of the descent
-                if (speed > 2.6 && pitch > 10) pitch = 10f;
-            } else if (above > 4) {
-                pitch = speed > 1.4 ? -6f : 8f;                                // flare: bleed speed
-            } else {
-                pitch = 14f;                                                   // touch down
+            double roof = Double.isNaN(shipRoofY) ? refY : shipRoofY;
+            double pointY = roof + 4.0;
+            double height = p.getY() - roof;
+            double horizontalSpeed = Math.hypot(v.x, v.z);
+            double lineHeight = p.getY() - pointY;
+            double desiredPitch = Math.toDegrees(Math.atan2(lineHeight, Math.max(1.0, dist)));
+            pitch = (float) clamp(desiredPitch, -8, 40);
+            if (speed > 2.6 && pitch > 10) pitch = 10f;
+
+            // Once inside the final 30 blocks, do not chase an unreachable point in a tight
+            // circle. Level out, fly past on a wide arc, and make another straight approach.
+            if (goAroundTicks > 0 && !shipDropActive) {
+                double heading = Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
+                turnYaw(p, heading + (shipApproaches % 2 == 0 ? -115 : 115), 3.5f);
+                p.setPitch(0f);
+                goAroundTicks--;
+                landDecision(client, dist, height, horizontalSpeed, 0f, "go-around arc " + shipApproaches + "/3");
+                return;
             }
-            // low and still flying for a long time: force it down
-            nearGroundTicks = above < 5 ? nearGroundTicks + 1 : 0;
-            if (nearGroundTicks > 100) pitch = 35f;
-            if (dist > 3) turnYaw(p, yawToSpot, 4f);            // smooth turn, no camera snapping
+            boolean tooHighOrFast = dist <= 30 && (height > Math.max(12, dist * 0.65) || horizontalSpeed > 3.0);
+            if (tooHighOrFast && !shipDropActive) {
+                if (shipApproaches >= 3) {
+                    retryLanding(client, "three ship approaches could not safely reach the roof");
+                    return;
+                }
+                shipApproaches++;
+                goAroundTicks = 50;
+                double heading = Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
+                turnYaw(p, heading + (shipApproaches % 2 == 0 ? -115 : 115), 3.5f);
+                p.setPitch(0f);
+                landDecision(client, dist, height, horizontalSpeed, 0f, "go-around " + shipApproaches + "/3");
+                return;
+            }
+
+            // Bleed horizontal momentum before considering a chestplate drop.
+            if (FlightConfig.shipLandingChestplateDrop && shipLanding && !shipDropActive
+                    && dist <= 8 && height >= 1.5 && height <= 5 && horizontalSpeed >= 0.8) {
+                p.setPitch(-8f);
+                turnYaw(p, Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())), 6f);
+                landDecision(client, dist, height, horizontalSpeed, p.getPitch(), "bleeding speed");
+                return;
+            }
+
+            if (FlightConfig.shipLandingChestplateDrop && shipLanding && !shipDropActive
+                    && dist <= 8 && height >= 1.5 && height <= 5 && hasInventoryChestplate(p)) {
+                String refusal = shipDropRefusal(client, p, tx, tz, roof, horizontalSpeed);
+                if (refusal == null && hasInventoryChestplate(p) && equipChestplate(client)) {
+                    shipDropActive = true;
+                    debug(client, "Ship chestplate drop SWAPPED: all roof/impact samples solid");
+                    landDecision(client, dist, height, horizontalSpeed, pitch, "swap allowed");
+                    return;
+                }
+                if (refusal == null) refusal = hasInventoryChestplate(p) ? "swap did not complete this tick" : "no chestplate in inventory";
+                landDecision(client, dist, height, horizontalSpeed, pitch, "swap refused: " + refusal);
+                // A refusal is a go-around, never a blind drop over the void or roof edge.
+                if (shipApproaches >= 3) {
+                    retryLanding(client, "safe chestplate drop unavailable: " + refusal);
+                    return;
+                }
+                shipApproaches++;
+                goAroundTicks = 50;
+                double heading = Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
+                turnYaw(p, heading + (shipApproaches % 2 == 0 ? -115 : 115), 3.5f);
+                p.setPitch(0f);
+                return;
+            }
+
+            // If a drop has started, recover immediately if the fall is no longer over nearby
+            // solid ground. The normal frameCheck/teamhome and pearl rescue remain untouched.
+            if (shipDropActive && !p.isOnGround()) {
+                double gb = groundBelow(client, p, 40);
+                if ((Double.isNaN(gb) || p.getY() - gb > 8 || p.getY() < roof - 10)
+                        && equipElytra(client)) {
+                    shipDropActive = false;
+                    debug(client, "Chestplate-drop safety net: elytra restored; re-glide");
+                    client.options.jumpKey.setPressed(ticks % 2 == 0);
+                    return;
+                }
+            }
+
+            // If the drop toggle is off or no chestplate exists, use the line-of-sight approach.
+            if (dist > 30 && height > 10) {
+                pitch = (float) clamp(desiredPitch, -8, 40);
+                if (speed > 2.6 && pitch > 10) pitch = 10f;
+            }
+            turnYaw(p, Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())), 6f);
             p.setPitch(pitch);
+            landDecision(client, dist, height, horizontalSpeed, pitch, shipDropActive ? "drop active" : (FlightConfig.shipLandingChestplateDrop && shipLanding && !hasInventoryChestplate(p) ? "no chestplate: normal landing fallback" : "approach"));
             return;
         }
 
@@ -639,6 +726,62 @@ public final class FlightRunner {
         p.setPitch(pitch);
     }
 
+    private static void landDecision(MinecraftClient client, double dist, double height, double speed, float pitch, String decision) {
+        if (!FlightConfig.debugMode || ticks - lastLandDebug < 20) return;
+        lastLandDebug = ticks;
+        debug(client, "LAND distance=" + fmt(dist) + " heightRoof=" + fmt(height)
+                + " horizontalSpeed=" + fmt(speed) + " pitch=" + fmt(pitch) + " decision=" + decision);
+    }
+
+    private static boolean hasInventoryChestplate(ClientPlayerEntity p) {
+        PlayerScreenHandler h = p.playerScreenHandler;
+        for (int s = 9; s <= 44; s++) if (isChestplate(h.getSlot(s).getStack())) return true;
+        return false;
+    }
+
+    /** Null means safe. Every sampled column must be loaded and have a solid surface at roof level. */
+    private static String shipDropRefusal(MinecraftClient client, ClientPlayerEntity p,
+                                           double tx, double tz, double roof, double horizontalSpeed) {
+        if (horizontalSpeed >= 0.8) return "horizontal speed is not below 0.8";
+        double gb = groundBelow(client, p, 12);
+        if (Double.isNaN(gb) || p.getY() - gb > 5.5) return "no solid ground directly below";
+        double impactX = p.getX() + p.getVelocity().x * 6.0;
+        double impactZ = p.getZ() + p.getVelocity().z * 6.0;
+        double[][] anchors = {{p.getX(), p.getZ()}, {impactX, impactZ}};
+        for (double[] a : anchors) {
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    int x = (int) Math.floor(a[0]) + dx;
+                    int z = (int) Math.floor(a[1]) + dz;
+                    if (!chunkLoaded(client, x, z)) return "predicted drop area is not loaded";
+                    int top = groundAt(client, x, z);
+                    if (top < 0 || Math.abs(top - roof) > 2) return "void or roof edge in predicted drop area";
+                    if (!solid(client, x, (int) Math.floor(roof) - 1, z)
+                            && !solid(client, x, (int) Math.floor(roof), z))
+                        return "no solid roof block in predicted drop area";
+                }
+            }
+        }
+        // Sample the corridor between current and predicted impact positions.
+        for (int i = 1; i < 6; i++) {
+            double x = p.getX() + (impactX - p.getX()) * i / 6.0;
+            double z = p.getZ() + (impactZ - p.getZ()) * i / 6.0;
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    int sx = (int) Math.floor(x) + dx;
+                    int sz = (int) Math.floor(z) + dz;
+                    if (!chunkLoaded(client, sx, sz)) return "corridor margin is not loaded";
+                    int top = groundAt(client, sx, sz);
+                    if (top < 0 || Math.abs(top - roof) > 2) return "gap or roof edge between player and predicted impact";
+                    if (!solid(client, sx, (int) Math.floor(roof) - 1, sz)
+                            && !solid(client, sx, (int) Math.floor(roof), sz))
+                        return "non-solid block in predicted drop corridor";
+                }
+            }
+        }
+        return null;
+    }
+
     /** Turns the camera towards a heading by at most maxStep degrees per tick. */
     private static void turnYaw(ClientPlayerEntity p, double desired, float maxStep) {
         float cur = p.getYaw();
@@ -652,6 +795,9 @@ public final class FlightRunner {
         spotZ = z;
         spotSet = true;
         shipLanding = true;
+        shipApproaches = 0;
+        goAroundTicks = 0;
+        shipDropActive = false;
         scoutDone = true;
         shipRoofY = estimateShipRoofY(client, x, z, 3);
         refY = Double.isNaN(shipRoofY) ? y + 4 : shipRoofY;

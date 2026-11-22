@@ -29,7 +29,8 @@ public final class FlightConfig {
     public static List<Waypoint> waypoints = new ArrayList<>();
     public static int cruiseY = 180;          // flight altitude
     public static int pauseSeconds = 10;      // stop time at every point
-    public static boolean landWithChestplate = false; // wear a chestplate at every stop, elytra again before take off
+    public static boolean landWithChestplate = false; // normal waypoint stops
+    public static boolean shipLandingChestplateDrop = true; // safe mid-air chestplate drop on confirmed ship roofs // wear a chestplate at every stop, elytra again before take off
     public static int reserveRockets = 3;     // rockets that are never counted as usable
     public static boolean pearlRescue = true; // throw an ender pearl at the nearest island when falling low
     public static int pearlBelowY = 20;
@@ -51,7 +52,7 @@ public final class FlightConfig {
         List<Waypoint> waypoints = new ArrayList<>();
         int cruiseY = 180, pauseSeconds = 10, reserveRockets = 3, pearlBelowY = 20, teamhomeY = -30;
         int hudPos = 1, hudScale = 100, searchRadius = 100, landRadius = 40;
-        boolean pearlRescue = true, teamhome = true, landWithChestplate = false, hunt = true, scout = true, useShulkers = true, debugMode = false;
+        boolean pearlRescue = true, teamhome = true, landWithChestplate = false, shipLandingChestplateDrop = true, hunt = true, scout = true, useShulkers = true, debugMode = false;
         String teamhomeCommand = "teamhome";
     }
 
@@ -82,6 +83,7 @@ public final class FlightConfig {
             reserveRockets = clamp(d.reserveRockets, 0, 40);
             pearlRescue = d.pearlRescue;
             landWithChestplate = d.landWithChestplate;
+            shipLandingChestplateDrop = d.shipLandingChestplateDrop;
             pearlBelowY = clamp(d.pearlBelowY, -60, 120);
             teamhome = d.teamhome;
             teamhomeY = clamp(d.teamhomeY, -64, 40);
@@ -112,6 +114,7 @@ public final class FlightConfig {
         d.reserveRockets = reserveRockets;
         d.pearlRescue = pearlRescue;
         d.landWithChestplate = landWithChestplate;
+        d.shipLandingChestplateDrop = shipLandingChestplateDrop;
         d.pearlBelowY = pearlBelowY;
         d.teamhome = teamhome;
         d.teamhomeY = teamhomeY;
