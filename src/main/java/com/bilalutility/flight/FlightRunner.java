@@ -598,9 +598,15 @@ public final class FlightRunner {
         if (state == State.LAND) {
             // Recovery remains deliberately conservative: never rocket merely because we are
             // below a ship while already close to its roof.
-            if (!Double.isNaN(shipRoofY) && !p.isOnGround()
-                    && (p.getY() < shipRoofY - 1.5 || (dist > 25 && p.getY() < shipRoofY + 8))) {
-                if (ticks - lastRocket > 40 && speed < 2.0 && recoveryRockets < 2) {
+            boolean needsRecovery = !Double.isNaN(shipRoofY) && !p.isOnGround()
+                    && (shipLanding
+                        ? (dist > 40 && p.getY() < shipRoofY - 1.5)
+                        : (p.getY() < shipRoofY - 1.5 || (dist > 25 && p.getY() < shipRoofY + 8)));
+            if (needsRecovery) {
+                // Never fire a recovery rocket near a confirmed ship. Only allow the
+                // existing two-rocket reserve when far away and already below its roof.
+                if (ticks - lastRocket > 60 && speed < (shipLanding ? 1.2 : 2.0)
+                        && recoveryRockets < 2) {
                     recoveryRockets++;
                     debug(client, "Below the roof approach: playerY=" + fmt(p.getY()) + ", roofY=" + fmt(shipRoofY)
                             + "; recovery rocket " + recoveryRockets + "/2");
@@ -648,9 +654,9 @@ public final class FlightRunner {
             // Start bleeding horizontal momentum before reaching the narrow drop window.
             // The old code only flared inside 8 blocks, which was too late to get below 0.8.
             if (FlightConfig.shipLandingChestplateDrop && shipLanding && !shipDropActive
-                    && hasInventoryChestplate(p) && dist <= 24
-                    && height >= 1.5 && height <= 10 && horizontalSpeed >= 0.8) {
-                p.setPitch(-25f);
+                    && hasInventoryChestplate(p) && dist <= 32
+                    && height >= 1.5 && height <= 14 && horizontalSpeed >= 0.8) {
+                p.setPitch(-18f);
                 turnYaw(p, Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())), 6f);
                 landDecision(client, dist, height, horizontalSpeed, p.getPitch(), "flaring to bleed speed");
                 return;
@@ -707,7 +713,12 @@ public final class FlightRunner {
         // ---- cruising
         double err = FlightConfig.cruiseY - p.getY();
         pitch = (float) clamp(-err * 0.4, -55, 35);
-        if (firstRocketPending) {
+        if (shipLanding) {
+            // A confirmed ship is a no-firework approach zone. Retries and go-arounds
+            // must not accelerate the player into the ship's hull or walls.
+            firstRocketPending = false;
+            rocketCheckAt = 0;
+        } else if (firstRocketPending) {
             // the first rocket must work: fire it, check the speed, try again if nothing happened
             if (rocketCheckAt == 0) {
                 if (ticks - lastRocket >= 5) {
@@ -725,7 +736,7 @@ public final class FlightRunner {
                 rocketCheckAt = 0;
                 if (speed >= rocketSpeedBefore + 0.1) firstRocketPending = false;
             }
-        } else if (speed < 1.25 && ticks - lastRocket >= 20) {
+        } else if (!shipLanding && speed < 1.25 && ticks - lastRocket >= 20) {
             useRocket(client);
         }
         double dx = tx - p.getX(), dz = tz - p.getZ();
@@ -806,8 +817,10 @@ public final class FlightRunner {
         goAroundTicks = 0;
         shipDropActive = false;
         scoutDone = true;
+        firstRocketPending = false;
+        rocketCheckAt = 0;
         shipRoofY = estimateShipRoofY(client, x, z, 3);
-        refY = Double.isNaN(shipRoofY) ? y + 4 : shipRoofY;
+        refY = Double.isNaN(shipRoofY) ? y : shipRoofY;
         debug(client, "Ship confirmed (" + why + "): landing centre=" + fmt(x) + "," + fmt(z)
                 + ", shulker/frame y=" + fmt(y) + ", roofY=" + fmt(shipRoofY));
         msg(client, "Auto Elytra: untouched ship at " + target.name + " (" + why + "), going down");
@@ -851,11 +864,30 @@ public final class FlightRunner {
             return;
         }
         ClientPlayerEntity p = client.player;
+
+        // Any actual solid ship block counts as touchdown. The ship roof estimate is
+        // for steering/swap safety only; raised decorations must not invalidate landing.
+        if (shipLanding) {
+            double surface = groundBelow(client, p, 3);
+            boolean standingOnBlock = !Double.isNaN(surface)
+                    && Math.abs(p.getY() - surface) <= 0.75;
+            debug(client, "Ship touchdown: distance=" + fmt(dist) + ", playerY=" + fmt(p.getY())
+                    + ", solidSurfaceY=" + fmt(surface) + ", groundedBlock=" + standingOnBlock);
+            if (standingOnBlock && dist <= SHIP_LAND_RADIUS) {
+                found(client, "landed on the ship");
+                return;
+            }
+            retryLanding(client, !standingOnBlock
+                    ? "player is not standing on a solid ship block"
+                    : "touchdown outside the ship footprint");
+            return;
+        }
+
         boolean onFrame = frameTarget != null && !frameTarget.isRemoved();
         if (onFrame && Double.isNaN(shipRoofY)) {
             shipRoofY = estimateShipRoofY(client, frameTarget.getX(), frameTarget.getZ(), 3);
         }
-        double radius = shipLanding ? SHIP_LAND_RADIUS : (onFrame ? SHIP_LAND_RADIUS : FlightConfig.landRadius);
+        double radius = onFrame ? SHIP_LAND_RADIUS : FlightConfig.landRadius;
         boolean expectedShip = FlightConfig.hunt && (onFrame || shipLanding);
         double standingSurface = expectedShip ? groundBelow(client, p, 2) : Double.NaN;
         boolean solidUnderPlayer = !expectedShip || !Double.isNaN(standingSurface);
@@ -874,12 +906,6 @@ public final class FlightRunner {
             return;
         }
         if (FlightConfig.hunt) {
-            // A confirmed untouched ship is complete when the player is standing on any solid
-            // ship surface within the ship landing radius. Do not require standing over the frame.
-            if (shipLanding && onShipRoof) {
-                found(client, "landed on the ship");
-                return;
-            }
             if (onFrame) {
                 found(client, null);
                 return;
@@ -927,10 +953,6 @@ public final class FlightRunner {
                     enterPause(client);
                     return;
                 }
-            }
-            if (shipLanding) {
-                found(client, "landed on the roof above the third shulker");
-                return;
             }
             double possibleRoof = estimateShipRoofY(client, target.x + 0.5, target.z + 0.5, 12);
             if (!Double.isNaN(possibleRoof) && p.getY() < possibleRoof - 1.5) {
@@ -1038,16 +1060,35 @@ public final class FlightRunner {
         return Double.isNaN(value) || Double.isInfinite(value) ? "unknown" : String.format(Locale.ROOT, "%.1f", value);
     }
 
-    /** Finds the highest loaded solid surface near the detected ship; this is used as its roof level. */
+    /**
+     * Estimate the deck level from the most common loaded surface in the local area.
+     * A single raised mast, decoration, or frame must not pull the landing height upward.
+     */
     private static double estimateShipRoofY(MinecraftClient client, double x, double z, int radius) {
-        int highest = -1;
+        int side = radius * 2 + 1;
+        int[] tops = new int[side * side];
+        int count = 0;
+        int cx = (int) Math.floor(x);
+        int cz = (int) Math.floor(z);
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
-                int top = groundAt(client, (int) Math.floor(x) + dx, (int) Math.floor(z) + dz);
-                if (top > highest) highest = top;
+                int top = groundAt(client, cx + dx, cz + dz);
+                if (top >= 0) tops[count++] = top;
             }
         }
-        return highest < 0 ? Double.NaN : highest;
+        if (count == 0) return Double.NaN;
+
+        int bestY = -1;
+        int bestCount = 0;
+        for (int i = 0; i < count; i++) {
+            int matches = 0;
+            for (int j = 0; j < count; j++) if (tops[j] == tops[i]) matches++;
+            if (matches > bestCount || (matches == bestCount && (bestY < 0 || tops[i] < bestY))) {
+                bestY = tops[i];
+                bestCount = matches;
+            }
+        }
+        return bestY;
     }
 
     /** Drops the current point while flying and goes on to the next one. */
