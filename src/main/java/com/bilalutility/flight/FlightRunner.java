@@ -83,7 +83,7 @@ public final class FlightRunner {
     private static final double[] SHIP_SHAPE = {6.40, 19.21, 20.35};
     private static final double SHAPE_TOLERANCE = 1.5;
 
-    private static final double SHIP_LAND_RADIUS = 10;   // touchdown this close to the elytra shulker = on the ship roof
+    private static final double SHIP_LAND_RADIUS = 10;   // any solid ship surface within this radius counts as touchdown
 
     // ship detection / landing state of the current leg
     private static boolean shipLanding;
@@ -350,7 +350,7 @@ public final class FlightRunner {
         }
         if (src < 0) return false;
         moveToChest(client, src);
-        return true;
+        return chestplate ? chestplateWorn(p) : elytraWorn(p);
     }
 
     private static void moveToChest(MinecraftClient client, int src) {
@@ -491,6 +491,11 @@ public final class FlightRunner {
             tx = islandX + 0.5;
             tz = islandZ + 0.5;
             refY = islandY;
+        } else if (shipLanding && spotSet) {
+            // Once the ship is confirmed, navigate to the detected ship centre (third shulker),
+            // not the item frame. The frame is evidence of an elytra, not the landing target.
+            tx = spotX;
+            tz = spotZ;
         } else if (frameTarget != null && !frameTarget.isRemoved()) {
             tx = frameTarget.getX();
             tz = frameTarget.getZ();
@@ -640,12 +645,14 @@ public final class FlightRunner {
                 return;
             }
 
-            // Bleed horizontal momentum before considering a chestplate drop.
+            // Start bleeding horizontal momentum before reaching the narrow drop window.
+            // The old code only flared inside 8 blocks, which was too late to get below 0.8.
             if (FlightConfig.shipLandingChestplateDrop && shipLanding && !shipDropActive
-                    && dist <= 8 && height >= 1.5 && height <= 5 && horizontalSpeed >= 0.8) {
-                p.setPitch(-8f);
+                    && hasInventoryChestplate(p) && dist <= 24
+                    && height >= 1.5 && height <= 10 && horizontalSpeed >= 0.8) {
+                p.setPitch(-25f);
                 turnYaw(p, Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())), 6f);
-                landDecision(client, dist, height, horizontalSpeed, p.getPitch(), "bleeding speed");
+                landDecision(client, dist, height, horizontalSpeed, p.getPitch(), "flaring to bleed speed");
                 return;
             }
 
@@ -848,14 +855,18 @@ public final class FlightRunner {
         if (onFrame && Double.isNaN(shipRoofY)) {
             shipRoofY = estimateShipRoofY(client, frameTarget.getX(), frameTarget.getZ(), 3);
         }
-        double radius = (onFrame || shipLanding) ? SHIP_LAND_RADIUS : FlightConfig.landRadius;
+        double radius = shipLanding ? SHIP_LAND_RADIUS : (onFrame ? SHIP_LAND_RADIUS : FlightConfig.landRadius);
         boolean expectedShip = FlightConfig.hunt && (onFrame || shipLanding);
+        double standingSurface = expectedShip ? groundBelow(client, p, 2) : Double.NaN;
+        boolean solidUnderPlayer = !expectedShip || !Double.isNaN(standingSurface);
         boolean onShipRoof = !expectedShip || (!Double.isNaN(shipRoofY)
-                && p.getY() >= shipRoofY - 1.5 && dist <= radius);
+                && p.getY() >= shipRoofY - 1.5 && dist <= radius && solidUnderPlayer);
         debug(client, "Touchdown check: position=" + fmt(p.getX()) + "," + fmt(p.getY()) + "," + fmt(p.getZ())
-                + ", distance=" + fmt(dist) + ", roofY=" + fmt(shipRoofY) + ", onShipRoof=" + onShipRoof);
+                + ", shipDistance=" + fmt(dist) + ", roofY=" + fmt(shipRoofY)
+                + ", solidUnderPlayer=" + solidUnderPlayer + ", onShipRoof=" + onShipRoof);
         if (expectedShip && !onShipRoof) {
-            retryLanding(client, Double.isNaN(shipRoofY) ? "ship roof height could not be confirmed" : "landed below or away from the ship roof");
+            retryLanding(client, Double.isNaN(shipRoofY) ? "ship roof height could not be confirmed"
+                    : (!solidUnderPlayer ? "no solid ship block directly under player" : "landed below or away from the ship"));
             return;
         }
         if (dist > radius) {
@@ -863,6 +874,12 @@ public final class FlightRunner {
             return;
         }
         if (FlightConfig.hunt) {
+            // A confirmed untouched ship is complete when the player is standing on any solid
+            // ship surface within the ship landing radius. Do not require standing over the frame.
+            if (shipLanding && onShipRoof) {
+                found(client, "landed on the ship");
+                return;
+            }
             if (onFrame) {
                 found(client, null);
                 return;
