@@ -15,6 +15,7 @@ public final class FlightConfig {
     public static class Waypoint {
         public String name = "";
         public int x, z;
+        public String result = "";   // elytra hunting: "", "elytra", "empty", "unreachable" ...
 
         public Waypoint() {}
 
@@ -35,6 +36,11 @@ public final class FlightConfig {
     public static boolean teamhome = true;    // send the command below when the player is under teamhomeY (End only)
     public static int teamhomeY = -30;
     public static String teamhomeCommand = "teamhome";
+    public static boolean hunt = true;        // look for the elytra item frame; when found: land on the ship, alert, stop
+    public static boolean scout = true;       // search for frames while flying
+    public static boolean useShulkers = true; // use the three shulkers to recognize untouched ships
+    public static int searchRadius = 100;     // how far around a point it looks for the elytra item frame
+    public static int landRadius = 40;        // landing this close to the point counts as "arrived"
     public static int hudPos = 1;             // 0 off, 1 top centre, 2 top left, 3 top right
     public static int hudScale = 100;
 
@@ -43,8 +49,8 @@ public final class FlightConfig {
     private static class Data {
         List<Waypoint> waypoints = new ArrayList<>();
         int cruiseY = 180, pauseSeconds = 10, reserveRockets = 3, pearlBelowY = 20, teamhomeY = -30;
-        int hudPos = 1, hudScale = 100;
-        boolean pearlRescue = true, teamhome = true, landWithChestplate = false;
+        int hudPos = 1, hudScale = 100, searchRadius = 100, landRadius = 40;
+        boolean pearlRescue = true, teamhome = true, landWithChestplate = false, hunt = true, scout = true, useShulkers = true;
         String teamhomeCommand = "teamhome";
     }
 
@@ -80,6 +86,15 @@ public final class FlightConfig {
             teamhomeY = clamp(d.teamhomeY, -64, 40);
             String c = cleanCommand(d.teamhomeCommand);
             teamhomeCommand = c.isEmpty() ? "teamhome" : c;
+            for (Waypoint w : waypoints) {
+                if (w.result == null) w.result = "";
+                if (w.name == null) w.name = "";
+            }
+            hunt = d.hunt;
+            scout = d.scout;
+            useShulkers = d.useShulkers;
+            searchRadius = d.searchRadius <= 0 ? 100 : clamp(d.searchRadius, 30, 200);
+            landRadius = d.landRadius <= 0 ? 40 : clamp(d.landRadius, 10, 100);
             hudPos = clamp(d.hudPos, 0, 3);
             hudScale = d.hudScale <= 0 ? 100 : clamp(d.hudScale, 50, 200);
         } catch (Exception ignored) {
@@ -99,6 +114,11 @@ public final class FlightConfig {
         d.teamhome = teamhome;
         d.teamhomeY = teamhomeY;
         d.teamhomeCommand = teamhomeCommand;
+        d.hunt = hunt;
+        d.scout = scout;
+        d.useShulkers = useShulkers;
+        d.searchRadius = searchRadius;
+        d.landRadius = landRadius;
         d.hudPos = hudPos;
         d.hudScale = hudScale;
         try {

@@ -14,6 +14,7 @@ public class FlightClient implements ClientModInitializer {
     private static final KeyBinding.Category CATEGORY = com.bilalutility.BilalKeys.CATEGORY;
     private static KeyBinding toggleKey;
     private static KeyBinding settingsKey;
+    private static KeyBinding debugShulkersKey;
 
     @Override
     public void onInitializeClient() {
@@ -22,6 +23,8 @@ public class FlightClient implements ClientModInitializer {
                 "key.bilalfly.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
         settingsKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.bilalfly.settings", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
+        debugShulkersKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.bilalfly.debug_shulkers", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
 
         HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT,
                 Identifier.of("bilal_utility", "flight_hud"), FlightHud::render);
@@ -37,6 +40,11 @@ public class FlightClient implements ClientModInitializer {
             while (settingsKey.wasPressed()) {
                 if (client.world != null && client.currentScreen == null) {
                     client.setScreen(new FlightScreen(null));
+                }
+            }
+            while (debugShulkersKey.wasPressed()) {
+                if (client.world != null && client.player != null) {
+                    FlightRunner.debugShulkers(client);
                 }
             }
             FlightRunner.tick(client);

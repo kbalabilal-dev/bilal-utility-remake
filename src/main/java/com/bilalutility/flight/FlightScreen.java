@@ -70,7 +70,8 @@ public class FlightScreen extends BilalScreen {
         for (int i = 0; i < FlightConfig.waypoints.size(); i++) {
             FlightConfig.Waypoint w = FlightConfig.waypoints.get(i);
             int index = i;
-            label((i + 1) + ".  " + w.x + ", " + w.z, left, y + 6, 0xFFFFFFFF);
+            String res = w.result == null || w.result.isEmpty() ? "" : "   [" + w.result + "]";
+            label((i + 1) + ".  " + w.x + ", " + w.z + res, left, y + 6, 0xFFFFFFFF);
             buttonSized("Remove", left + inner - 64, y, 64, 20, () -> {
                 if (index < FlightConfig.waypoints.size()) FlightConfig.waypoints.remove(index);
                 FlightConfig.save();
@@ -108,6 +109,30 @@ public class FlightScreen extends BilalScreen {
                 v -> FlightConfig.landWithChestplate = v == 1,
                 v -> v == 1 ? "wear chestplate" : "keep elytra on", FlightConfig::save,
                 "wear chestplate = swaps to a chestplate from your inventory at every stop and back to the elytra before taking off");
+
+        // ---- elytra hunting ----
+        y += 34;
+        section("Elytra hunting", y);
+        y += 14;
+        toggle(left, y, half, "Hunt elytra", () -> FlightConfig.hunt, v -> FlightConfig.hunt = v,
+                FlightConfig::save, "Looks for the elytra item frame. When it finds one it lands on the ship, plays an alert and stops, so you take the elytra yourself");
+        toggle(left + half + 4, y, half, "Frame scouting", () -> FlightConfig.scout, v -> FlightConfig.scout = v,
+                FlightConfig::save, "Searches for an elytra frame while flying. Shulker checking is controlled separately below");
+        y += 24;
+        stepper(y, "Search radius", () -> FlightConfig.searchRadius, v -> FlightConfig.searchRadius = v, 30, 200, 5, 20,
+                v -> v + " m", FlightConfig::save, "How far around a point it looks for shulkers and item frames. Chunkbase points are often far from the ship");
+        y += 22;
+        toggle(left, y, inner, "Use shulkers", () -> FlightConfig.useShulkers, v -> FlightConfig.useShulkers = v,
+                FlightConfig::save, "Three shulkers in the ship's known shape means untouched. Two or a wrong shape means looted. No visible shulkers means unknown, not empty");
+        y += 24;
+        stepper(y, "Landing radius", () -> FlightConfig.landRadius, v -> FlightConfig.landRadius = v, 10, 100, 5, 10,
+                v -> v + " m", FlightConfig::save, "Landing this close to a point counts as arrived (when a frame is seen it lands within 12 blocks of it)");
+        y += 24;
+        button("Reset results", left, y, inner, () -> {
+            for (FlightConfig.Waypoint w : FlightConfig.waypoints) w.result = "";
+            FlightConfig.save();
+            clearAndInit();
+        }, "Clears the elytra / empty marks so every point is flown again");
 
         // ---- safety ----
         y += 34;

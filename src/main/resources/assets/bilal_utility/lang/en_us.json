@@ -15,5 +15,6 @@
   "key.bilalfly.toggle": "Auto Elytra | Start / stop flight",
   "key.bilalfly.settings": "Auto Elytra | Open settings",
   "key.bilalhud.toggle": "HUD | Show / hide the HUD",
-  "key.bilalhud.settings": "HUD | Open settings"
+  "key.bilalhud.settings": "HUD | Open settings",
+  "key.bilalfly.debug_shulkers": "Auto Elytra | Debug nearby shulkers (print coordinates and verdict)"
 }
