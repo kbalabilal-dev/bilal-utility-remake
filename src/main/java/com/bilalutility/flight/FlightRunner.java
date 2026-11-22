@@ -165,6 +165,7 @@ public final class FlightRunner {
         resetLeg();
         routeBlocks = routeLength(client.player);
         state = State.PREPARE;
+        FlightRecorder.begin(client);
         debug(client, "Run started. Queue points=" + remaining.size() + ", search radius=" + FlightConfig.searchRadius
                 + ", hunt=" + FlightConfig.hunt + ", shulkers=" + FlightConfig.useShulkers);
     }
@@ -194,6 +195,7 @@ public final class FlightRunner {
             client.options.jumpKey.setPressed(false);
             client.options.forwardKey.setPressed(false);
         }
+        FlightRecorder.onStop(message);
         if (client != null && message != null) msg(client, message);
     }
 
@@ -250,6 +252,7 @@ public final class FlightRunner {
                         alertLeft % 20 == 0 ? 1.0f : 1.4f));
             }
         }
+        FlightRecorder.tick(client, state.name(), state == State.IDLE);
         if (state == State.IDLE) return;
         ClientPlayerEntity p = client.player;
         if (p == null || client.world == null || client.world.getRegistryKey() != startDimension) {
@@ -1108,6 +1111,12 @@ public final class FlightRunner {
         alertLeft = 100;
         String text = "ELYTRA FOUND at " + name + (note == null ? "" : " (" + note + ")")
                 + " - take it, then press the flight key to go on";
+        if (client.player != null) {
+            double ax = frameTarget != null ? frameTarget.getX() : client.player.getX();
+            double ay = frameTarget != null ? frameTarget.getY() : client.player.getY();
+            double az = frameTarget != null ? frameTarget.getZ() : client.player.getZ();
+            FlightRecorder.startTeach(client, ax, ay, az);
+        }
         stop(client, text);
         if (client.player != null) client.player.sendMessage(Text.literal(text), false);
     }
@@ -1162,6 +1171,7 @@ public final class FlightRunner {
     }
 
     private static void debug(MinecraftClient client, String text) {
+        FlightRecorder.event(text);
         if (FlightConfig.debugMode && client != null && client.player != null) {
             client.player.sendMessage(Text.literal("[Auto Elytra DEBUG] " + text), false);
         }

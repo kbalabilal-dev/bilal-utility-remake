@@ -147,6 +147,9 @@ public class FlightScreen extends BilalScreen {
         toggle(left, y, inner, "Debug mode", () -> FlightConfig.debugMode, v -> FlightConfig.debugMode = v,
                 FlightConfig::save, "Prints destination, shulker/frame checks, flight decisions, landing phases and retry reasons in chat");
         y += 24;
+        toggle(left, y, inner, "Record flights", () -> FlightConfig.recordFlights, v -> FlightConfig.recordFlights = v,
+                FlightConfig::save, "Writes a log to .minecraft/bilal_flight_logs and, after an elytra is found, records how you walk, hit the frame and take off (teach mode). Send the files to improve the mod");
+        y += 24;
         button("Reset results", left, y, inner, () -> {
             for (FlightConfig.Waypoint w : FlightConfig.waypoints) w.result = "";
             FlightConfig.save();
