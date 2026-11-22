@@ -197,7 +197,7 @@ public final class FlightRunner {
         if (alertLeft > 0) {                 // the "elytra found" alert keeps ringing after the flight stopped
             alertLeft--;
             if (alertLeft % 10 == 0 && client.player != null) {
-                client.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.ENTITY_PLAYER_LEVELUP,
+                client.getSoundManager().play(PositionedSoundInstance.ui(SoundEvents.ENTITY_PLAYER_LEVELUP,
                         alertLeft % 20 == 0 ? 1.0f : 1.4f));
             }
         }
@@ -793,9 +793,9 @@ public final class FlightRunner {
                 for (int k = j + 1; k < found.size(); k++) {
                     ShulkerEntity a = found.get(i), b = found.get(j), c = found.get(k);
                     double[] ds = {
-                            a.getPos().distanceTo(b.getPos()),
-                            a.getPos().distanceTo(c.getPos()),
-                            b.getPos().distanceTo(c.getPos())
+                            new Vec3d(a.getX(), a.getY(), a.getZ()).distanceTo(new Vec3d(b.getX(), b.getY(), b.getZ())),
+                            new Vec3d(a.getX(), a.getY(), a.getZ()).distanceTo(new Vec3d(c.getX(), c.getY(), c.getZ())),
+                            new Vec3d(b.getX(), b.getY(), b.getZ()).distanceTo(new Vec3d(c.getX(), c.getY(), c.getZ()))
                     };
                     java.util.Arrays.sort(ds);
                     double error = Math.abs(ds[0] - SHIP_SHAPE[0])
@@ -810,9 +810,9 @@ public final class FlightRunner {
         }
         if (ba != null) {
             double[] ds = {
-                    ba.getPos().distanceTo(bb.getPos()),
-                    ba.getPos().distanceTo(bc.getPos()),
-                    bb.getPos().distanceTo(bc.getPos())
+                    new Vec3d(ba.getX(), ba.getY(), ba.getZ()).distanceTo(new Vec3d(bb.getX(), bb.getY(), bb.getZ())),
+                    new Vec3d(ba.getX(), ba.getY(), ba.getZ()).distanceTo(new Vec3d(bc.getX(), bc.getY(), bc.getZ())),
+                    new Vec3d(bb.getX(), bb.getY(), bb.getZ()).distanceTo(new Vec3d(bc.getX(), bc.getY(), bc.getZ()))
             };
             java.util.Arrays.sort(ds);
             boolean matches = Math.abs(ds[0] - SHIP_SHAPE[0]) <= SHAPE_TOLERANCE
