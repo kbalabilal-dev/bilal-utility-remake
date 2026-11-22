@@ -1,0 +1,29 @@
+Bilal Utility v2.0.0 - Ship routine movement and shulker-bullet defense
+
+What changed
+- Ship Step remains manual: the user presses it once to start each numbered step.
+- Once a step starts, the routine now attempts to walk to the required position automatically.
+- It can jump when it meets a horizontal collision or needs to step up.
+- It automatically moves to the item-frame position and pearl throw position.
+- While moving, mining, or interacting with the frame, it looks for nearby ShulkerBulletEntity objects.
+- It aims at an incoming bullet and attacks the entity with the currently selected/first non-empty hotbar item.
+- It waits for the bullet to disappear before resuming the interrupted action.
+- If a bullet does not enter melee range or cannot be destroyed within the timeout, the routine stops and releases movement/attack keys.
+- A basic support check prevents the player from deliberately walking forward when no nearby supporting block is detected.
+- Version bumped to 2.0.0.
+
+Step sequence
+1. Select netherite pickaxe.
+2. Walk/jump to the drop block and mine it.
+3. Walk/jump to the block under the front shulker and mine it.
+4. Walk/jump in front of the item frame and take the elytra.
+5. Walk/jump to and mine the first tunnel block.
+6. Walk/jump to and mine the second tunnel block.
+7. Walk/jump to the measured pearl position, then perform the existing pearl escape and landing recovery.
+
+Important limitations / test notes
+- This is direct local steering, not a full A* pathfinder. It follows a direct line, jumps when blocked, and stops if it detects no safe footing or cannot make progress. It may stop at corners or complicated terrain rather than route around them.
+- The shulker bullet defense uses a normal entity attack. The client waits for the bullet entity to be removed; the actual result must be verified on the user's Folia server.
+- Pearl targeting remains the previous loaded-chunk heuristic; it is not a full projectile trajectory simulation.
+- This source was not Gradle-compiled in this environment: the ZIP has no Gradle wrapper and Gradle is not installed here. Build with the project's normal Gradle setup before using it on a live server.
+- First test in a safe copy/world. Keep the emergency stop (sneak key) available. Do not test over valuable/void areas until movement has been observed.

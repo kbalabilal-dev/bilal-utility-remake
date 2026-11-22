@@ -5,6 +5,7 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.ShulkerEntity;
+import net.minecraft.entity.projectile.ShulkerBulletEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
@@ -29,7 +30,7 @@ import java.util.Locale;
  * and aims/throws the pearl. Every dangerous action requires a fresh key press.
  */
 public final class FlightShipRoutine {
-    private enum Action { NONE, MINE, FRAME, WAIT_TELEPORT, WAIT_SAFE_GROUND }
+    private enum Action { NONE, MOVE, MINE, FRAME, WAIT_TELEPORT, WAIT_SAFE_GROUND }
 
     private static boolean active;
     private static boolean dryRunActive;
@@ -46,6 +47,14 @@ public final class FlightShipRoutine {
     private static String currentStepName = "";
     private static int pearlSlot = -1;
     private static boolean pearlNeedsConfirm;
+    private static Vec3d moveTarget;
+    private static int movePurpose; // 1=mine, 2=frame, 3=pearl
+    private static int moveStuckTicks;
+    private static double lastMoveDistance = Double.MAX_VALUE;
+    private static int bulletAttackCooldown;
+    private static int bulletWaitTicks;
+    private static ShulkerBulletEntity currentBullet;
+    private static boolean pearlPositionReached;
 
     private FlightShipRoutine() {}
 
@@ -79,6 +88,13 @@ public final class FlightShipRoutine {
                 ? "DRY RUN: press Ship step to preview each action"
                 : "Press Ship step to equip your netherite pickaxe";
         pearlNeedsConfirm = false;
+        moveTarget = null;
+        movePurpose = 0;
+        moveStuckTicks = 0;
+        bulletAttackCooldown = 0;
+        bulletWaitTicks = 0;
+        currentBullet = null;
+        pearlPositionReached = false;
         FlightRecorder.event("SHIP_ROUTINE_START facing=" + facing + " frame=" + f(x) + "," + f(y) + "," + f(z)
                 + " dryRun=" + dryRunActive);
         message(client, "Ship routine ready. Set a key for 'Ship step' in Controls.");
@@ -133,12 +149,14 @@ public final class FlightShipRoutine {
         FlightRunner.routineVoidSafety(client, action != Action.WAIT_TELEPORT && action != Action.WAIT_SAFE_GROUND);
         if (!active || !basicSafety(client, action == Action.MINE && step == 1)) return;
         if (action == Action.NONE) return;
+        if (action != Action.WAIT_TELEPORT && action != Action.WAIT_SAFE_GROUND && defendAgainstBullet(client)) return;
         actionTicks++;
         if (actionTicks > actionTimeout()) {
             fail(client, "Timed out during " + status);
             return;
         }
         switch (action) {
+            case MOVE -> tickMove(client);
             case MINE -> tickMine(client);
             case FRAME -> tickFrame(client);
             case WAIT_TELEPORT -> tickTeleport(client);
@@ -149,6 +167,7 @@ public final class FlightShipRoutine {
 
     private static int actionTimeout() {
         return switch (action) {
+            case MOVE -> 360;
             case MINE -> 180;
             case FRAME -> 220;
             case WAIT_TELEPORT -> 180;
@@ -166,7 +185,7 @@ public final class FlightShipRoutine {
         FlightRecorder.routineStepStart("EQUIP_PICKAXE", "slot=" + slot + " held=minecraft:netherite_pickaxe");
         client.player.getInventory().setSelectedSlot(slot);
         FlightRecorder.routineStepEnd("EQUIP_PICKAXE", "OK", "slot=" + slot);
-        completeStep(client, "Netherite pickaxe selected. Move onto the drop block, then press Ship step again.");
+        completeStep(client, "Netherite pickaxe selected. Press Ship step to move to and break the drop block.");
     }
 
     private static void beginMine(MinecraftClient client, boolean drop, double aMin, double aMax,
@@ -174,10 +193,6 @@ public final class FlightShipRoutine {
         ClientPlayerEntity p = client.player;
         if (!p.getMainHandStack().isOf(Items.NETHERITE_PICKAXE)) {
             fail(client, "Netherite pickaxe is not selected");
-            return;
-        }
-        if (!p.isOnGround() || Double.isNaN(groundBelow(client, p, 3))) {
-            fail(client, "Stand on solid ground before mining this block");
             return;
         }
         targetBlock = null;
@@ -195,29 +210,223 @@ public final class FlightShipRoutine {
             fail(client, "Expected purpur block not found for " + name + ". Nothing was mined.");
             return;
         }
-        double distance = p.getEyePos().distanceTo(Vec3d.ofCenter(targetBlock));
-        if (distance > 4.5) {
-            status = "Move closer to " + name + " (" + f(distance) + " blocks), then press Ship step";
-            message(client, status);
+        if (drop && !hasLandingSupport(client, targetBlock, 6)) {
+            fail(client, "Planned drop has no confirmed landing block");
             return;
         }
-        if (drop) {
-            if (Math.abs(p.getY() - (frameY + 2.5)) > 2.0 || !hasLandingSupport(client, targetBlock, 6)) {
-                fail(client, "Planned drop is not in the recorded safe position or has no confirmed landing block");
-                return;
-            }
-        }
-        if (!drop && Double.isNaN(groundBelow(client, p, 3))) {
-            fail(client, "No solid support under you; refusing to mine");
-            return;
-        }
-        action = Action.MINE;
-        actionTicks = 0;
-        status = "Mining " + name;
         currentStepName = name.replace(' ', '_').toUpperCase(Locale.ROOT);
-        lookAt(p, Vec3d.ofCenter(targetBlock));
+        Vec3d stand = findStandPosition(client, targetBlock, drop);
+        if (stand == null) {
+            fail(client, "No safe standing position found near " + name);
+            return;
+        }
         FlightRecorder.routineStepStart(currentStepName, "block=" + blockId(client, targetBlock)
                 + " local=" + localDescription(targetBlock) + " pos=" + targetBlock.toString());
+        startMove(client, stand, 1, "Moving to " + name);
+    }
+
+
+    private static void startMove(MinecraftClient client, Vec3d target, int purpose, String label) {
+        moveTarget = target;
+        movePurpose = purpose;
+        moveStuckTicks = 0;
+        lastMoveDistance = Double.MAX_VALUE;
+        action = Action.MOVE;
+        actionTicks = 0;
+        status = label + " (walking/jumping)";
+        releaseAttack(client);
+        releaseMovement(client);
+    }
+
+    private static void tickMove(MinecraftClient client) {
+        ClientPlayerEntity p = client.player;
+        if (moveTarget == null) { fail(client, "Movement target was lost"); return; }
+        double dx = moveTarget.x - p.getX();
+        double dz = moveTarget.z - p.getZ();
+        double horizontal = Math.hypot(dx, dz);
+        double dy = moveTarget.y - p.getY();
+        if (horizontal < 0.55 && Math.abs(dy) < 1.15 && p.isOnGround()) {
+            releaseMovement(client);
+            int purpose = movePurpose;
+            moveTarget = null;
+            movePurpose = 0;
+            action = Action.NONE;
+            actionTicks = 0;
+            if (purpose == 1) {
+                if (targetBlock == null) { fail(client, "Mining target lost after movement"); return; }
+                if (p.getEyePos().distanceTo(Vec3d.ofCenter(targetBlock)) > 4.5) {
+                    fail(client, "Reached movement target but mining block is still out of reach"); return;
+                }
+                action = Action.MINE;
+                status = "Mining " + currentStepName.toLowerCase(Locale.ROOT).replace('_', ' ');
+                lookAt(p, Vec3d.ofCenter(targetBlock));
+            } else if (purpose == 2) {
+                frame = findFrame(client);
+                if (frame == null || p.getEyePos().distanceTo(frame.getPos()) > 4.5) {
+                    fail(client, "Could not reach the item frame safely"); return;
+                }
+                action = Action.FRAME;
+                status = "Taking elytra from item frame";
+            } else if (purpose == 3) {
+                pearlPositionReached = true;
+                beginPearl(client);
+            }
+            return;
+        }
+        double distance = Math.sqrt(horizontal * horizontal + dy * dy);
+        if (distance > lastMoveDistance - 0.015) moveStuckTicks++; else moveStuckTicks = 0;
+        lastMoveDistance = distance;
+        if (moveStuckTicks > 65) { fail(client, "Movement blocked: could not reach the next safe position"); return; }
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        p.setYaw(yaw);
+        p.setPitch(0.0f);
+        double dirX = dx / Math.max(0.001, horizontal);
+        double dirZ = dz / Math.max(0.001, horizontal);
+        if (!hasFootingAhead(client, p, dirX, dirZ)) {
+            fail(client, "Safe movement path ends at an unsupported block; refusing to walk into the void");
+            return;
+        }
+        client.options.forwardKey.setPressed(true);
+        client.options.backKey.setPressed(false);
+        client.options.leftKey.setPressed(false);
+        client.options.rightKey.setPressed(false);
+        client.options.sprintKey.setPressed(false);
+        boolean obstacle = p.horizontalCollision || (dy > 0.45 && p.isOnGround());
+        client.options.jumpKey.setPressed(obstacle || (dy > 0.65 && p.isOnGround()));
+    }
+
+    private static boolean hasFootingAhead(MinecraftClient client, ClientPlayerEntity p, double dirX, double dirZ) {
+        double x = p.getX() + dirX * 0.65;
+        double z = p.getZ() + dirZ * 0.65;
+        int baseY = MathHelper.floor(p.getY() - 0.15);
+        for (int y = baseY - 1; y <= baseY + 1; y++) {
+            BlockPos support = new BlockPos(MathHelper.floor(x), y, MathHelper.floor(z));
+            if (!client.world.getBlockState(support).getCollisionShape(client.world, support).isEmpty()) return true;
+        }
+        return false;
+    }
+
+    private static Vec3d findStandPosition(MinecraftClient client, BlockPos target, boolean standOnTarget) {
+        if (standOnTarget) {
+            Vec3d pos = new Vec3d(target.getX() + 0.5, target.getY() + 1.0, target.getZ() + 0.5);
+            if (isSafeStanding(client, BlockPos.ofFloored(pos))) return pos;
+        }
+        Vec3d best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (int radius = 0; radius <= 4; radius++) {
+            for (int ox = -radius; ox <= radius; ox++) for (int oz = -radius; oz <= radius; oz++) {
+                if (Math.max(Math.abs(ox), Math.abs(oz)) != radius) continue;
+                int x = target.getX() + ox, z = target.getZ() + oz;
+                for (int y = target.getY() - 2; y <= target.getY() + 2; y++) {
+                    BlockPos feet = new BlockPos(x, y, z);
+                    if (!isSafeStanding(client, feet)) continue;
+                    double d = client.player.getPos().squaredDistanceTo(new Vec3d(x + 0.5, y, z + 0.5));
+                    if (d < bestDistance) { bestDistance = d; best = new Vec3d(x + 0.5, y, z + 0.5); }
+                }
+            }
+            if (best != null) break;
+        }
+        return best;
+    }
+
+    private static Vec3d findNearbyGround(MinecraftClient client, Vec3d desired, int radius) {
+        BlockPos base = BlockPos.ofFloored(desired);
+        Vec3d best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (int r = 0; r <= radius; r++) for (int ox = -r; ox <= r; ox++) for (int oz = -r; oz <= r; oz++) {
+            if (Math.max(Math.abs(ox), Math.abs(oz)) != r) continue;
+            int x = base.getX() + ox, z = base.getZ() + oz;
+            for (int y = base.getY() - 3; y <= base.getY() + 2; y++) {
+                BlockPos feet = new BlockPos(x, y, z);
+                if (!isSafeStanding(client, feet)) continue;
+                double d = new Vec3d(x + 0.5, y, z + 0.5).squaredDistanceTo(desired);
+                if (d < bestDistance) { bestDistance = d; best = new Vec3d(x + 0.5, y, z + 0.5); }
+            }
+        }
+        return best;
+    }
+
+    private static boolean isSafeStanding(MinecraftClient client, BlockPos feet) {
+        BlockPos support = feet.down();
+        return !client.world.getBlockState(support).getCollisionShape(client.world, support).isEmpty()
+                && client.world.getBlockState(feet).getCollisionShape(client.world, feet).isEmpty()
+                && client.world.getBlockState(feet.up()).getCollisionShape(client.world, feet.up()).isEmpty()
+                && client.world.getFluidState(feet).isEmpty();
+    }
+
+    private static Vec3d localPlayerPosition(double a, double left, double h) {
+        double[] world = localWorld(a, left);
+        return new Vec3d(frameX + world[0], frameY + h, frameZ + world[1]);
+    }
+
+    private static boolean defendAgainstBullet(MinecraftClient client) {
+        ClientPlayerEntity p = client.player;
+        if (bulletAttackCooldown > 0) bulletAttackCooldown--;
+        if (currentBullet == null || currentBullet.isRemoved()
+                || currentBullet.squaredDistanceTo(p) > 36.0) {
+            currentBullet = null;
+            double nearest = Double.MAX_VALUE;
+            for (ShulkerBulletEntity bullet : client.world.getEntitiesByClass(ShulkerBulletEntity.class,
+                    p.getBoundingBox().expand(6), e -> !e.isRemoved())) {
+                double d = bullet.squaredDistanceTo(p);
+                if (d < nearest) { nearest = d; currentBullet = bullet; }
+            }
+            bulletWaitTicks = 0;
+        }
+        if (currentBullet == null || currentBullet.isRemoved()) return false;
+        double distance = currentBullet.distanceTo(p);
+        if (distance > 2.8) {
+            Vec3d toPlayer = p.getPos().subtract(currentBullet.getPos());
+            double closing = toPlayer.lengthSquared() < 0.001 ? 1.0
+                    : currentBullet.getVelocity().normalize().dotProduct(toPlayer.normalize());
+            if (closing < 0.20) { currentBullet = null; return false; }
+            releaseMovement(client);
+            status = "Tracking incoming bullet; waiting until it is within hit range";
+            bulletWaitTicks++;
+            if (bulletWaitTicks > 35) {
+                fail(client, "Incoming shulker bullet did not enter hit range; stopped for safety");
+            }
+            return true;
+        }
+        releaseMovement(client);
+        releaseAttack(client);
+        lookAt(p, currentBullet.getPos());
+        if (bulletAttackCooldown == 0) {
+            int slot = firstUsableCombatSlot(p);
+            if (slot >= 0) p.getInventory().setSelectedSlot(slot);
+            client.interactionManager.attackEntity(p, currentBullet);
+            p.swingHand(Hand.MAIN_HAND);
+            bulletAttackCooldown = 5;
+            FlightRecorder.event("SHIP_BULLET_ATTACK distance=" + f(distance));
+        }
+        bulletWaitTicks++;
+        status = "Defending: attacking shulker bullet (" + f(distance) + " blocks)";
+        if (currentBullet.isRemoved()) {
+            FlightRecorder.event("SHIP_BULLET_DESTROYED");
+            currentBullet = null;
+            bulletWaitTicks = 0;
+            return true;
+        }
+        if (bulletWaitTicks > 35) {
+            fail(client, "Could not destroy incoming shulker bullet; stopped for safety");
+            return true;
+        }
+        return true;
+    }
+
+    private static int firstUsableCombatSlot(ClientPlayerEntity p) {
+        for (int i = 0; i < 9; i++) if (!p.getInventory().getStack(i).isEmpty()) return i;
+        return -1;
+    }
+
+    private static void releaseMovement(MinecraftClient client) {
+        if (client == null || client.options == null) return;
+        client.options.forwardKey.setPressed(false);
+        client.options.backKey.setPressed(false);
+        client.options.leftKey.setPressed(false);
+        client.options.rightKey.setPressed(false);
+        client.options.jumpKey.setPressed(false);
+        client.options.sprintKey.setPressed(false);
     }
 
     private static void tickMine(MinecraftClient client) {
@@ -272,18 +481,14 @@ public final class FlightShipRoutine {
             fail(client, "The frame is already empty; elytra count must be checked manually");
             return;
         }
-        double distance = client.player.getEyePos().distanceTo(new Vec3d(frame.getX(), frame.getY(), frame.getZ()));
-        if (distance > 4.5) {
-            status = "Move closer to the item frame (" + f(distance) + " blocks), then press Ship step";
-            message(client, status);
-            return;
-        }
+        Vec3d frameApproach = new Vec3d(frame.getX() + facing.getOffsetX() * 1.5,
+                frameY - 1.5, frame.getZ() + facing.getOffsetZ() * 1.5);
+        Vec3d stand = findNearbyGround(client, frameApproach, 2);
+        if (stand == null) { fail(client, "No safe standing position found in front of the item frame"); return; }
         baselineElytra = countElytra(client.player);
-        action = Action.FRAME;
-        actionTicks = 0;
-        status = "Taking elytra from item frame";
         FlightRecorder.routineStepStart("TAKE_ELYTRA", "facing=" + facing.asString() + " elytraBefore=" + baselineElytra
                 + " frameLocal=0,0,0");
+        startMove(client, stand, 2, "Moving in front of the item frame");
     }
 
     private static void tickFrame(MinecraftClient client) {
@@ -323,22 +528,23 @@ public final class FlightShipRoutine {
             message(client, status);
             return;
         }
-        if (!p.isOnGround() || Double.isNaN(groundBelow(client, p, 3))) {
-            fail(client, "Stand on confirmed solid ground at the tunnel mouth before throwing the pearl");
-            return;
-        }
-        if (p.getVelocity().horizontalLength() > 0.15
-                || client.options.forwardKey.isPressed() || client.options.backKey.isPressed()
-                || client.options.leftKey.isPressed() || client.options.rightKey.isPressed()
-                || client.options.jumpKey.isPressed() || client.options.sprintKey.isPressed()) {
-            status = "Stop moving and stand still before the pearl throw, then press Ship step";
-            message(client, status);
-            return;
+        if (!p.isOnGround() && action == Action.NONE) {
+            status = "Preparing to move to the pearl position";
         }
         pearlSlot = hotbarSlot(p, Items.ENDER_PEARL);
         if (pearlSlot < 0) {
             fail(client, "Ender pearl not found in hotbar");
             return;
+        }
+        if (!pearlPositionReached) {
+            Vec3d desired = localPlayerPosition(-0.8, 1.3, -0.5);
+            Vec3d stand = findNearbyGround(client, desired, 3);
+            if (stand == null) { fail(client, "No safe ground found at the recorded pearl position"); return; }
+            startMove(client, stand, 3, "Moving to the pearl throw position");
+            return;
+        }
+        if (!p.isOnGround() || Double.isNaN(groundBelow(client, p, 3))) {
+            fail(client, "Not standing on confirmed solid ground at pearl position"); return;
         }
         Vec3d destination = findPearlTarget(client);
         if (destination == null) {
@@ -416,6 +622,7 @@ public final class FlightShipRoutine {
         active = false;
         action = Action.NONE;
         releaseAttack(client);
+        releaseMovement(client);
         status = "Safe ground confirmed. Resuming the waypoint queue.";
         message(client, status);
         FlightRunner.start(client);
@@ -470,6 +677,7 @@ public final class FlightShipRoutine {
         }
         if (p.hasStatusEffect(StatusEffects.LEVITATION) && action != Action.WAIT_TELEPORT && action != Action.WAIT_SAFE_GROUND) {
             releaseAttack(client);
+            releaseMovement(client);
             status = "Levitation active: routine is waiting; no mining or pearl use";
             return false;
         }
@@ -548,11 +756,11 @@ public final class FlightShipRoutine {
 
     private static String nextInstruction() {
         return switch (step) {
-            case 2 -> "Move to the block under the front shulker, then press Ship step";
-            case 3 -> "Move in front of the item frame, then press Ship step";
-            case 4 -> "Move to the first tunnel block, then press Ship step";
-            case 5 -> "Move to the second tunnel block, then press Ship step";
-            case 6 -> "Move to the tunnel mouth on solid ground, then press Ship step to throw the pearl";
+            case 2 -> "Press Ship step: mod moves to and breaks the block under the front shulker";
+            case 3 -> "Press Ship step: mod moves to the frame and takes the elytra";
+            case 4 -> "Press Ship step: mod moves to and breaks the first tunnel block";
+            case 5 -> "Press Ship step: mod moves to and breaks the second tunnel block";
+            case 6 -> "Press Ship step: mod moves to the pearl position and throws";
             default -> "Step complete";
         };
     }
@@ -593,6 +801,7 @@ public final class FlightShipRoutine {
     private static void fail(MinecraftClient client, String reason) {
         if (!active) return;
         releaseAttack(client);
+        releaseMovement(client);
         FlightRecorder.routineStepEnd("STEP_" + (step + 1), "FAILED", "reason=" + reason.replace(' ', '_'));
         FlightRecorder.event("SHIP_ROUTINE_FAIL step=" + step + " reason=" + reason);
         active = false;
@@ -619,7 +828,7 @@ public final class FlightShipRoutine {
         lines.add("Ship routine: " + (dryRunActive ? "DRY RUN" : "ASSISTED"));
         lines.add("Step " + Math.min(step + 1, 7) + "/7: " + plannedStep());
         lines.add("Facing " + facing.asString() + " | " + status);
-        lines.add("Press the Ship step key for the next action");
+        lines.add(action == Action.MOVE ? "Moving automatically (jump enabled)" : "Press Ship step for the next action");
         return lines;
     }
 }
