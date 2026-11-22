@@ -262,7 +262,7 @@ public final class FlightShipRoutine {
                 lookAt(p, Vec3d.ofCenter(targetBlock));
             } else if (purpose == 2) {
                 frame = findFrame(client);
-                if (frame == null || p.getEyePos().distanceTo(frame.getPos()) > 4.5) {
+                if (frame == null || p.getEyePos().distanceTo(new Vec3d(frame.getX(), frame.getY(), frame.getZ())) > 4.5) {
                     fail(client, "Could not reach the item frame safely"); return;
                 }
                 action = Action.FRAME;
@@ -320,7 +320,7 @@ public final class FlightShipRoutine {
                 for (int y = target.getY() - 2; y <= target.getY() + 2; y++) {
                     BlockPos feet = new BlockPos(x, y, z);
                     if (!isSafeStanding(client, feet)) continue;
-                    double d = client.player.getPos().squaredDistanceTo(new Vec3d(x + 0.5, y, z + 0.5));
+                    double d = new Vec3d(client.player.getX(), client.player.getY(), client.player.getZ()).squaredDistanceTo(new Vec3d(x + 0.5, y, z + 0.5));
                     if (d < bestDistance) { bestDistance = d; best = new Vec3d(x + 0.5, y, z + 0.5); }
                 }
             }
@@ -376,7 +376,7 @@ public final class FlightShipRoutine {
         if (currentBullet == null || currentBullet.isRemoved()) return false;
         double distance = currentBullet.distanceTo(p);
         if (distance > 2.8) {
-            Vec3d toPlayer = p.getPos().subtract(currentBullet.getPos());
+            Vec3d toPlayer = new Vec3d(p.getX(), p.getY(), p.getZ()).subtract(new Vec3d(currentBullet.getX(), currentBullet.getY(), currentBullet.getZ()));
             double closing = toPlayer.lengthSquared() < 0.001 ? 1.0
                     : currentBullet.getVelocity().normalize().dotProduct(toPlayer.normalize());
             if (closing < 0.20) { currentBullet = null; return false; }
@@ -390,7 +390,7 @@ public final class FlightShipRoutine {
         }
         releaseMovement(client);
         releaseAttack(client);
-        lookAt(p, currentBullet.getPos());
+        lookAt(p, new Vec3d(currentBullet.getX(), currentBullet.getY(), currentBullet.getZ()));
         if (bulletAttackCooldown == 0) {
             int slot = firstUsableCombatSlot(p);
             if (slot >= 0) p.getInventory().setSelectedSlot(slot);

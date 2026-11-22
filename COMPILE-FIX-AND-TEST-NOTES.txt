@@ -1,0 +1,22 @@
+Bilal Utility v2.0.0 compile fix and runtime review
+====================================================
+
+Compile fix:
+- Replaced unsupported Entity.getPos() calls in FlightShipRoutine.java with
+  Vec3d values built from getX(), getY(), and getZ(), which are available
+  on these Yarn-mapped entity classes.
+
+Runtime review notes:
+- Movement is direct steering, not pathfinding. It can stop at corners,
+  walls, narrow passages, or awkward elevation changes.
+- Bullet defense only attacks bullets detected within 6 blocks and waits
+  for close range. If a bullet never enters hit range, the routine stops.
+- The routine relies on the server accepting the client attackEntity action
+  against shulker bullets. This needs an in-game test on the target server.
+- The pearl landing scan considers already-loaded chunks and estimates
+  a landing target; it does not simulate the full pearl trajectory.
+- No Gradle build was run in this environment because Gradle is not installed.
+  Please run the project build and share any new compiler output.
+
+This update fixes the five reported compile errors; it is not a guarantee
+that every Yarn/API or in-game behavior issue has been eliminated.
