@@ -69,6 +69,7 @@ public final class FlightRunner {
     private static boolean shipDropActive;
     private static long lastLandDebug;
     private static double shipRoofY = Double.NaN;
+    private static double shipAnchorY = Double.NaN;   // Y of the frame / shulker that proved the ship
     private static long lastDebugHeartbeat;
     private static boolean scoutDone, orbiting, spotSet;
     private static double spotX, spotZ, refY;
@@ -205,6 +206,7 @@ public final class FlightRunner {
         landFails = 0;
         landingAttempts = 0;
         shipRoofY = Double.NaN;
+        shipAnchorY = Double.NaN;
         nearGroundTicks = 0;
         shipApproaches = 0;
         goAroundTicks = 0;
@@ -890,6 +892,7 @@ public final class FlightRunner {
         scoutDone = true;
         firstRocketPending = false;
         rocketCheckAt = 0;
+        shipAnchorY = y;
         shipRoofY = estimateShipRoofY(client, x, z, 5);
         refY = Double.isNaN(shipRoofY) ? y : shipRoofY;
         debug(client, "Ship confirmed (" + why + "): body centre=" + fmt(x) + "," + fmt(z)
@@ -931,10 +934,13 @@ public final class FlightRunner {
     private static boolean isShipDeckTouchdown(MinecraftClient client, ClientPlayerEntity p, double dist) {
         double surface = groundBelow(client, p, 3);
         double roof = Double.isNaN(shipRoofY) ? refY : shipRoofY;
-        return !Double.isNaN(surface) && !Double.isNaN(roof)
-                && Math.abs(p.getY() - surface) <= 0.75
-                && surface >= roof - 2.0 && surface <= roof + 6.0
-                && dist <= SHIP_LAND_RADIUS;
+        // The estimated roof can be wrong, so the real frame / shulker height is a second proof:
+        // the deck is at most a few blocks below it and the roof a few blocks above it.
+        double anchor = frameTarget != null && !frameTarget.isRemoved() ? frameTarget.getY() : shipAnchorY;
+        if (Double.isNaN(surface) || Math.abs(p.getY() - surface) > 0.75 || dist > SHIP_LAND_RADIUS) return false;
+        boolean roofOk = !Double.isNaN(roof) && surface >= roof - 2.0 && surface <= roof + 6.0;
+        boolean anchorOk = !Double.isNaN(anchor) && surface >= anchor - 3.0 && surface <= anchor + 12.0;
+        return roofOk || anchorOk;
     }
 
     private static void pauseUnsafeShipTouchdown(MinecraftClient client, String reason) {
@@ -961,7 +967,7 @@ public final class FlightRunner {
             double roof = Double.isNaN(shipRoofY) ? refY : shipRoofY;
             boolean validDeck = isShipDeckTouchdown(client, p, dist);
             debug(client, "Ship touchdown: distance=" + fmt(dist) + ", playerY=" + fmt(p.getY())
-                    + ", surfaceY=" + fmt(surface) + ", roofY=" + fmt(roof)
+                    + ", surfaceY=" + fmt(surface) + ", roofY=" + fmt(roof) + ", anchorY=" + fmt(frameTarget != null ? frameTarget.getY() : shipAnchorY)
                     + ", validDeck=" + validDeck);
             if (validDeck) {
                 found(client, "landed on the ship body");
