@@ -1,0 +1,168 @@
+package com.bilalutility.flight;
+
+import com.bilalutility.ui.BilalScreen;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.TextFieldWidget;
+import net.minecraft.text.Text;
+
+/** Waypoint queue, flight settings and safety settings on one scrolling page. */
+public class FlightScreen extends BilalScreen {
+    private static final String[] HUD_NAMES = {"off", "top center", "top left", "top right"};
+    private static String draftX = "";
+    private static String draftZ = "";
+
+    public FlightScreen(Screen parent) {
+        super("Auto Elytra", "Flies to your points, nearest first", 0x66CCFF, parent);
+    }
+
+    private static String startLabel() {
+        return FlightRunner.isRunning() ? "Stop flight" : "Start flight";
+    }
+
+    @Override
+    protected void build() {
+        int left = panelLeft() + 12;
+        int inner = panelW() - 24;
+        int half = (inner - 4) / 2;
+        int y = contentTop();
+
+        // ---- run (stays at the top) ----
+        ButtonWidget startBtn = button(startLabel(), left, y, inner, () -> {
+            if (FlightRunner.isRunning()) {
+                FlightRunner.stop(client, "Auto Elytra stopped");
+                clearAndInit();
+            } else {
+                client.setScreen(null);
+                FlightRunner.start(client);
+            }
+        }, "Needs an elytra, firework rockets and an ender pearl in your hotbar");
+        startBtn.active = client != null && client.world != null;
+
+        // ---- add a point ----
+        y += 30;
+        section("Add a point  (X and Z)", y);
+        y += 14;
+        TextFieldWidget fx = new TextFieldWidget(textRenderer, left, y, half, 20, Text.literal("X"));
+        fx.setMaxLength(9);
+        fx.setText(draftX);
+        fx.setChangedListener(s -> draftX = s);
+        addDrawableChild(fx);
+        TextFieldWidget fz = new TextFieldWidget(textRenderer, left + half + 4, y, half, 20, Text.literal("Z"));
+        fz.setMaxLength(9);
+        fz.setText(draftZ);
+        fz.setChangedListener(s -> draftZ = s);
+        addDrawableChild(fz);
+        y += 24;
+        button("Add point", left, y, half, this::addPoint, "Adds X / Z to the queue");
+        button("My position", left + half + 4, y, half, () -> {
+            if (client.player != null) {
+                draftX = String.valueOf((int) Math.floor(client.player.getX()));
+                draftZ = String.valueOf((int) Math.floor(client.player.getZ()));
+                clearAndInit();
+            }
+        }, "Fills X and Z with where you stand");
+
+        // ---- queue ----
+        y += 34;
+        section("Queue (" + FlightConfig.waypoints.size() + ")", y);
+        y += 14;
+        for (int i = 0; i < FlightConfig.waypoints.size(); i++) {
+            FlightConfig.Waypoint w = FlightConfig.waypoints.get(i);
+            int index = i;
+            label((i + 1) + ".  " + w.x + ", " + w.z, left, y + 6, 0xFFFFFFFF);
+            buttonSized("Remove", left + inner - 64, y, 64, 20, () -> {
+                if (index < FlightConfig.waypoints.size()) FlightConfig.waypoints.remove(index);
+                FlightConfig.save();
+                clearAndInit();
+            }, null);
+            y += 22;
+        }
+        if (FlightConfig.waypoints.isEmpty()) {
+            label("No points yet", left, y + 6, 0xFF9A9AA8);
+            y += 22;
+        } else {
+            button("Clear all", left, y, inner, () -> {
+                FlightConfig.waypoints.clear();
+                FlightConfig.save();
+                clearAndInit();
+            }, null);
+            y += 22;
+        }
+
+        // ---- flight ----
+        y += 12;
+        section("Flight", y);
+        y += 14;
+        stepper(y, "Altitude", () -> FlightConfig.cruiseY, v -> FlightConfig.cruiseY = v, 60, 300, 5, 20,
+                v -> "Y " + v, FlightConfig::save, "Higher = more time to recover. The End has no ceiling problem.");
+        y += 22;
+        stepper(y, "Stop time", () -> FlightConfig.pauseSeconds, v -> FlightConfig.pauseSeconds = v, 0, 120, 1, 10,
+                v -> v + " s", FlightConfig::save, "How long it waits after landing at a point");
+        y += 22;
+        stepper(y, "Spare rockets", () -> FlightConfig.reserveRockets, v -> FlightConfig.reserveRockets = v, 0, 40, 1, 5,
+                v -> String.valueOf(v), FlightConfig::save, "Below this reserve it lands on the nearest island");
+
+        y += 24;
+        cycle(left, y, inner, "Landing", 2, () -> FlightConfig.landWithChestplate ? 1 : 0,
+                v -> FlightConfig.landWithChestplate = v == 1,
+                v -> v == 1 ? "wear chestplate" : "keep elytra on", FlightConfig::save,
+                "wear chestplate = swaps to a chestplate from your inventory at every stop and back to the elytra before taking off");
+
+        // ---- safety ----
+        y += 34;
+        section("Void safety", y);
+        y += 14;
+        toggle(left, y, half, "Pearl rescue", () -> FlightConfig.pearlRescue, v -> FlightConfig.pearlRescue = v,
+                FlightConfig::save, "Throws an ender pearl at the nearest island when you fall low");
+        toggle(left + half + 4, y, half, "Teamhome", () -> FlightConfig.teamhome, v -> FlightConfig.teamhome = v,
+                FlightConfig::save, "Sends the command when you fall under the Y below (End only)");
+        y += 24;
+        stepper(y, "Pearl below", () -> FlightConfig.pearlBelowY, v -> FlightConfig.pearlBelowY = v, -60, 120, 5, 20,
+                v -> "Y " + v, FlightConfig::save, null);
+        y += 22;
+        stepper(y, "Teamhome below", () -> FlightConfig.teamhomeY, v -> FlightConfig.teamhomeY = v, -64, 40, 1, 10,
+                v -> "Y " + v, FlightConfig::save, null);
+        y += 26;
+        label("Teamhome command (without the /)", left, y, 0xFFFFFFFF);
+        y += 12;
+        TextFieldWidget cmd = new TextFieldWidget(textRenderer, left, y, inner, 20, Text.literal("Command"));
+        cmd.setMaxLength(40);
+        cmd.setText(FlightConfig.teamhomeCommand);
+        cmd.setChangedListener(s -> {
+            String c = FlightConfig.cleanCommand(s);
+            FlightConfig.teamhomeCommand = c.isEmpty() ? "teamhome" : c;
+            FlightConfig.save();
+        });
+        addDrawableChild(cmd);
+
+        // ---- progress box ----
+        y += 34;
+        section("Progress box", y);
+        y += 14;
+        cycle(left, y, inner, "Position", 4, () -> FlightConfig.hudPos, v -> FlightConfig.hudPos = v,
+                v -> HUD_NAMES[v], FlightConfig::save, "Where the box shows while flying");
+        y += 24;
+        stepper(y, "Size", () -> FlightConfig.hudScale, v -> FlightConfig.hudScale = v, 50, 200, 5, 25,
+                v -> v + "%", FlightConfig::save, null);
+    }
+
+    private void addPoint() {
+        try {
+            int x = Integer.parseInt(draftX.trim());
+            int z = Integer.parseInt(draftZ.trim());
+            FlightConfig.waypoints.add(new FlightConfig.Waypoint("P" + (FlightConfig.waypoints.size() + 1), x, z));
+            FlightConfig.save();
+            draftX = "";
+            draftZ = "";
+            clearAndInit();
+        } catch (NumberFormatException e) {
+            if (client.player != null) client.player.sendMessage(Text.literal("Enter X and Z as whole numbers"), true);
+        }
+    }
+
+    @Override
+    protected void saveAndLeave() {
+        FlightConfig.save();
+    }
+}

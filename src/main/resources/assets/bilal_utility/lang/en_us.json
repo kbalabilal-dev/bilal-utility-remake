@@ -1,0 +1,19 @@
+{
+  "key.category.bilal_utility.main": "Bilal Utility",
+  "key.anchormacro.run": "Anchor Macro | Fire anchor (tap = one, hold = chain)",
+  "key.regear.start": "Auto Regear | Start / stop buying your kit",
+  "key.regear.pause": "Auto Regear | Pause / resume the run",
+  "key.regear.sort": "Auto Regear | Sort hotbar and offhand only (no buying)",
+  "key.regear.nextkit": "Auto Regear | Load next kit",
+  "key.regear.prevkit": "Auto Regear | Load previous kit",
+  "key.regear.settings": "Auto Regear | Open settings",
+  "key.tpahere.open": "TPAHere | Open player picker (press again to stop a running queue)",
+  "key.tpahere.cancel": "TPAHere | Stop the queue",
+  "key.tpahere.pause": "TPAHere | Pause / resume the queue",
+  "key.tpahere.autohit": "TPAHere | Toggle auto hit (also restarts the last queue)",
+  "key.tpahere.settings": "TPAHere | Open settings",
+  "key.bilalfly.toggle": "Auto Elytra | Start / stop flight",
+  "key.bilalfly.settings": "Auto Elytra | Open settings",
+  "key.bilalhud.toggle": "HUD | Show / hide the HUD",
+  "key.bilalhud.settings": "HUD | Open settings"
+}

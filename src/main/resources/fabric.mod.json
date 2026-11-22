@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "bilal_utility",
+  "version": "${version}",
+  "name": "Bilal Utility",
+  "description": "Client-side utility pack: Anchor Macro, Auto Regear, TPAHere, Auto Elytra and HUD.",
+  "icon": "assets/bilal_utility/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.bilalutility.anchor.AnchorMacroClient",
+      "com.bilalutility.regear.RegearClient",
+      "com.bilalutility.tpa.TpaHereClient",
+      "com.bilalutility.hud.HudClient",
+      "com.bilalutility.flight.FlightClient"
+    ],
+    "modmenu": [
+      "com.bilalutility.BilalModMenu"
+    ]
+  },
+  "mixins": [
+    "bilal_utility.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.18.0",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "modmenu": "*"
+  }
+}
