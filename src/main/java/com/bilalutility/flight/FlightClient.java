@@ -15,6 +15,7 @@ public class FlightClient implements ClientModInitializer {
     private static KeyBinding toggleKey;
     private static KeyBinding settingsKey;
     private static KeyBinding debugShulkersKey;
+    private static KeyBinding shipStepKey;
 
     @Override
     public void onInitializeClient() {
@@ -25,13 +26,17 @@ public class FlightClient implements ClientModInitializer {
                 "key.bilalfly.settings", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
         debugShulkersKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.bilalfly.debug_shulkers", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
+        shipStepKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.bilalfly.ship_step", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
 
         HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT,
                 Identifier.of("bilal_utility", "flight_hud"), FlightHud::render);
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (toggleKey.wasPressed()) {
-                if (FlightRunner.isPausedAfterLandingFailure()) {
+                if (FlightShipRoutine.isActive()) {
+                    FlightShipRoutine.cancel(client);
+                } else if (FlightRunner.isPausedAfterLandingFailure()) {
                     FlightRunner.resumeAfterLandingFailure(client);
                 } else if (FlightRunner.isRunning()) {
                     FlightRunner.stop(client, "Auto Elytra stopped");
@@ -44,11 +49,15 @@ public class FlightClient implements ClientModInitializer {
                     client.setScreen(new FlightScreen(null));
                 }
             }
+            while (shipStepKey.wasPressed()) {
+                FlightShipRoutine.advance(client);
+            }
             while (debugShulkersKey.wasPressed()) {
                 if (client.world != null && client.player != null) {
                     FlightRunner.debugShulkers(client);
                 }
             }
+            FlightShipRoutine.tick(client);
             FlightRunner.tick(client);
         });
     }

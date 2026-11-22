@@ -51,7 +51,7 @@ public final class FlightRecorder {
     private FlightRecorder() {}
 
     public static void begin(MinecraftClient client) {
-        if (teach) endTeach("flight restarted");
+        // Keep teach mode alive while the mod performs the takeoff after the ship routine.
         if (!FlightConfig.recordFlights || out != null) return;
         try {
             Path dir = FabricLoader.getInstance().getGameDir().resolve("bilal_flight_logs");
@@ -67,6 +67,17 @@ public final class FlightRecorder {
 
     public static void event(String text) {
         if (out != null) line("EVENT " + text);
+    }
+
+    public static void routineStepStart(String name, String details) {
+        if (out != null) line("ROUTINE_STEP_START tick=" + ticks + " ms=" + System.currentTimeMillis()
+                + " name=" + name + (details == null || details.isEmpty() ? "" : " " + details));
+    }
+
+    public static void routineStepEnd(String name, String result, String details) {
+        if (out != null) line("ROUTINE_STEP_END tick=" + ticks + " ms=" + System.currentTimeMillis()
+                + " name=" + name + " result=" + result
+                + (details == null || details.isEmpty() ? "" : " " + details));
     }
 
     public static void onStop(String message) {
@@ -122,7 +133,7 @@ public final class FlightRecorder {
         if (p == null || client.world == null) return;
         ticks++;
         if (teach) {
-            if (idle) teachTick(client, p);
+            teachTick(client, p);
         } else if (ticks % 20 == 0) {
             line("S " + state + " pos=" + f(p.getX()) + "," + f(p.getY()) + "," + f(p.getZ())
                     + " v=" + f(p.getVelocity().length()) + " glide=" + p.isGliding() + " gnd=" + p.isOnGround());

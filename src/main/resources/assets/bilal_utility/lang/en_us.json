@@ -16,5 +16,6 @@
   "key.bilalfly.settings": "Auto Elytra | Open settings",
   "key.bilalhud.toggle": "HUD | Show / hide the HUD",
   "key.bilalhud.settings": "HUD | Open settings",
-  "key.bilalfly.debug_shulkers": "Auto Elytra | Debug nearby shulkers (print coordinates and verdict)"
+  "key.bilalfly.debug_shulkers": "Auto Elytra | Debug nearby shulkers (print coordinates and verdict)",
+  "key.bilalfly.ship_step": "Auto Elytra | Ship routine: start next assisted step"
 }

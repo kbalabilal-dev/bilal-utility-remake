@@ -1,0 +1,33 @@
+Bilal Utility v1.9.9 - Assisted Ship Routine
+
+WHAT THIS VERSION ADDS
+- Off / Assisted setting in Auto Elytra settings.
+- Dry Run preview. It does not select items, mine, hit the frame, or throw a pearl.
+- New key binding: Auto Elytra | Ship routine: start next assisted step.
+  Set a key for it in Minecraft Controls. It is unbound by default.
+- HUD shows the current step and what the next step expects.
+- Routine starts after ELYTRA FOUND and the normal flight runner stops.
+- Routine records step start/end timestamps, results, block IDs and frame-relative positions when Record flights is enabled.
+- Teach recording now continues while the mod starts the next flight and ends after the glide has started.
+
+HOW ASSISTED MODE WORKS
+1. Press Ship step to select a netherite pickaxe by item.
+2. Walk onto the recorded drop block; press Ship step to mine it.
+3. After landing on solid ground, move to the block under the front shulker; press Ship step.
+4. Move in front of the frame; press Ship step. The routine waits for the frame to empty AND the inventory elytra count to rise by one.
+5. Move to each of the two recorded tunnel blocks and press Ship step to mine them.
+6. Stand still at the tunnel mouth on solid ground. Press Ship step to prepare the pearl.
+   If a shulker is nearby, the routine asks for a second Ship step confirmation.
+7. The routine searches already-loaded chunks for solid ground back-left of the frame, aims and throws the pearl, waits for teleport, then waits for levitation to end and solid ground to be confirmed.
+8. It starts the remaining waypoint queue. The existing takeoff code selects a rocket by item.
+
+IMPORTANT LIMITS
+- Assisted mode does NOT walk/pathfind the player. You still move to each indicated position yourself.
+- Full Auto is not included in this version. The settings show only Off and Assisted.
+- Pearl aiming is estimated from the measured standing throws (including an empirical 13.5-degree arc correction). It is not guaranteed for every island shape or server physics.
+- Pearl target search uses loaded chunks only. If no safe ground is found, the routine stops without throwing.
+- If a step fails, the routine releases attack, alerts, stops, and returns control. Sneak or the main Flight toggle also cancels it.
+- Emergency /teamhome remains active. The existing nearest-island pearl rescue is also called while the routine is active if the player falls below the configured rescue Y; emergency rescue cancels the assisted routine first.
+
+BUILD STATUS
+This source was not Gradle-compiled in the current environment: the ZIP has no Gradle wrapper, no Gradle executable is installed, and network access to fetch Gradle is unavailable. Java source syntax was checked, and the relevant Yarn 1.21.11+build.4 API names were checked against the official Fabric Yarn Javadocs, but this is not a substitute for a real Gradle build. Please run your normal Gradle build before using it on a live server.

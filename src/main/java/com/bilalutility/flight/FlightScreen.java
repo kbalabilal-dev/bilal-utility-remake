@@ -150,6 +150,14 @@ public class FlightScreen extends BilalScreen {
         toggle(left, y, inner, "Record flights", () -> FlightConfig.recordFlights, v -> FlightConfig.recordFlights = v,
                 FlightConfig::save, "Writes a log to .minecraft/bilal_flight_logs and, after an elytra is found, records how you walk, hit the frame and take off (teach mode). Send the files to improve the mod");
         y += 24;
+        cycle(left, y, inner, "Ship routine", 2, () -> FlightConfig.shipRoutineMode,
+                v -> FlightConfig.shipRoutineMode = v, v -> v == 0 ? "Off" : "Assisted",
+                FlightConfig::save, "Assisted mode asks for a fresh Ship step key press for each action. You still walk to each marked position; the mod selects the pickaxe, mines the recorded purpur blocks, takes the frame elytra and aims the pearl. Full automatic movement is not included yet.");
+        y += 24;
+        toggle(left, y, inner, "Ship routine: dry run", () -> FlightConfig.shipRoutineDryRun,
+                v -> FlightConfig.shipRoutineDryRun = v, FlightConfig::save,
+                "Preview only. Pressing Ship step prints the planned steps; it will not select items, mine blocks, hit the frame or throw a pearl.");
+        y += 24;
         button("Reset results", left, y, inner, () -> {
             for (FlightConfig.Waypoint w : FlightConfig.waypoints) w.result = "";
             FlightConfig.save();
