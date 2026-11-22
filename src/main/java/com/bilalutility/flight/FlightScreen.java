@@ -17,7 +17,7 @@ public class FlightScreen extends BilalScreen {
     }
 
     private static String startLabel() {
-        return FlightRunner.isRunning() ? "Stop flight" : "Start flight";
+        return FlightRunner.isPausedAfterLandingFailure() ? "Resume flight" : (FlightRunner.isRunning() ? "Stop flight" : "Start flight");
     }
 
     @Override
@@ -29,7 +29,10 @@ public class FlightScreen extends BilalScreen {
 
         // ---- run (stays at the top) ----
         ButtonWidget startBtn = button(startLabel(), left, y, inner, () -> {
-            if (FlightRunner.isRunning()) {
+            if (FlightRunner.isPausedAfterLandingFailure()) {
+                client.setScreen(null);
+                FlightRunner.resumeAfterLandingFailure(client);
+            } else if (FlightRunner.isRunning()) {
                 FlightRunner.stop(client, "Auto Elytra stopped");
                 clearAndInit();
             } else {
@@ -70,9 +73,17 @@ public class FlightScreen extends BilalScreen {
         for (int i = 0; i < FlightConfig.waypoints.size(); i++) {
             FlightConfig.Waypoint w = FlightConfig.waypoints.get(i);
             int index = i;
-            String res = w.result == null || w.result.isEmpty() ? "" : "   [" + w.result + "]";
+            String result = w.result == null ? "" : w.result;
+            String res = result.isEmpty() ? "" : "   [" + result + "]";
             label((i + 1) + ".  " + w.x + ", " + w.z + res, left, y + 6, 0xFFFFFFFF);
-            buttonSized("Remove", left + inner - 64, y, 64, 20, () -> {
+            if ("looted".equals(result)) {
+                buttonSized("Reactivate", left + inner - 138, y, 74, 20, () -> {
+                    if (index < FlightConfig.waypoints.size()) FlightConfig.waypoints.get(index).result = "";
+                    FlightConfig.save();
+                    clearAndInit();
+                }, "Clears only this point's looted result so it can be flown again");
+            }
+            buttonSized("Remove", left + inner - 62, y, 62, 20, () -> {
                 if (index < FlightConfig.waypoints.size()) FlightConfig.waypoints.remove(index);
                 FlightConfig.save();
                 clearAndInit();
@@ -127,6 +138,9 @@ public class FlightScreen extends BilalScreen {
         y += 24;
         stepper(y, "Landing radius", () -> FlightConfig.landRadius, v -> FlightConfig.landRadius = v, 10, 100, 5, 10,
                 v -> v + " m", FlightConfig::save, "Landing this close to a point counts as arrived (when a frame is seen it lands within 12 blocks of it)");
+        y += 24;
+        toggle(left, y, inner, "Debug mode", () -> FlightConfig.debugMode, v -> FlightConfig.debugMode = v,
+                FlightConfig::save, "Prints destination, shulker/frame checks, flight decisions, landing phases and retry reasons in chat");
         y += 24;
         button("Reset results", left, y, inner, () -> {
             for (FlightConfig.Waypoint w : FlightConfig.waypoints) w.result = "";

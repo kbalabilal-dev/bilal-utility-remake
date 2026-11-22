@@ -39,6 +39,7 @@ public final class FlightConfig {
     public static boolean hunt = true;        // look for the elytra item frame; when found: land on the ship, alert, stop
     public static boolean scout = true;       // search for frames while flying
     public static boolean useShulkers = true; // use the three shulkers to recognize untouched ships
+    public static boolean debugMode = false; // detailed Auto Elytra diagnostics in chat
     public static int searchRadius = 100;     // how far around a point it looks for the elytra item frame
     public static int landRadius = 40;        // landing this close to the point counts as "arrived"
     public static int hudPos = 1;             // 0 off, 1 top centre, 2 top left, 3 top right
@@ -50,7 +51,7 @@ public final class FlightConfig {
         List<Waypoint> waypoints = new ArrayList<>();
         int cruiseY = 180, pauseSeconds = 10, reserveRockets = 3, pearlBelowY = 20, teamhomeY = -30;
         int hudPos = 1, hudScale = 100, searchRadius = 100, landRadius = 40;
-        boolean pearlRescue = true, teamhome = true, landWithChestplate = false, hunt = true, scout = true, useShulkers = true;
+        boolean pearlRescue = true, teamhome = true, landWithChestplate = false, hunt = true, scout = true, useShulkers = true, debugMode = false;
         String teamhomeCommand = "teamhome";
     }
 
@@ -93,6 +94,7 @@ public final class FlightConfig {
             hunt = d.hunt;
             scout = d.scout;
             useShulkers = d.useShulkers;
+            debugMode = d.debugMode;
             searchRadius = d.searchRadius <= 0 ? 100 : clamp(d.searchRadius, 30, 200);
             landRadius = d.landRadius <= 0 ? 40 : clamp(d.landRadius, 10, 100);
             hudPos = clamp(d.hudPos, 0, 3);
@@ -117,6 +119,7 @@ public final class FlightConfig {
         d.hunt = hunt;
         d.scout = scout;
         d.useShulkers = useShulkers;
+        d.debugMode = debugMode;
         d.searchRadius = searchRadius;
         d.landRadius = landRadius;
         d.hudPos = hudPos;

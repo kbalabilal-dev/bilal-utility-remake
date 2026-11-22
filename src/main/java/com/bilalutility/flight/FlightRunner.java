@@ -38,7 +38,7 @@ import java.util.Locale;
  * ender pearl rescue and a per-frame /teamhome watchdog.
  */
 public final class FlightRunner {
-    private enum State { IDLE, PREPARE, TAKEOFF, CRUISE, LAND, PAUSE }
+    private enum State { IDLE, PREPARE, TAKEOFF, CRUISE, LAND, PAUSE, PAUSED_FAILURE }
 
     private static final double ORBIT_R = 30;        // circle radius when we arrive too high
     private static final double FRAME_LAND_RADIUS = 12;   // landing this close to the frame = on the ship
@@ -65,7 +65,9 @@ public final class FlightRunner {
     private static double rocketSpeedBefore;
 
     // current leg
-    private static int chunkSeen, landFails, nearGroundTicks;
+    private static int chunkSeen, landFails, nearGroundTicks, landingAttempts;
+    private static double shipRoofY = Double.NaN;
+    private static long lastDebugHeartbeat;
     private static boolean scoutDone, orbiting, spotSet;
     private static double spotX, spotZ, refY;
     private static double orbitDir = 1;
@@ -99,12 +101,17 @@ public final class FlightRunner {
             case CRUISE -> emergency ? "Emergency" : "Flying";
             case LAND -> orbiting ? "Circling down" : "Landing";
             case PAUSE -> "Waiting";
+            case PAUSED_FAILURE -> "Landing failed - paused";
         };
     }
 
     // ------------------------------------------------------------------ start / stop
 
     public static void start(MinecraftClient client) {
+        if (state == State.PAUSED_FAILURE) {
+            resumeAfterLandingFailure(client);
+            return;
+        }
         if (state != State.IDLE || client.player == null || client.world == null) return;
         if (FlightConfig.waypoints.isEmpty()) {
             msg(client, "Auto Elytra: add at least one point first");
@@ -121,11 +128,12 @@ public final class FlightRunner {
             }
         }
         if (remaining.isEmpty()) {
-            msg(client, "Auto Elytra: every point already has a result - press Reset results");
+            msg(client, "Auto Elytra: all points have results - use Reactivate on a looted point, or Reset results");
             return;
         }
         startDimension = client.world.getRegistryKey();
         ticks = 0;
+        lastDebugHeartbeat = 0;
         lastRocket = -100;      // never leave these from the last flight (this was the "first rocket" bug)
         lastPearl = -100;
         rocketsUsed = 0;
@@ -146,6 +154,24 @@ public final class FlightRunner {
         resetLeg();
         routeBlocks = routeLength(client.player);
         state = State.PREPARE;
+        debug(client, "Run started. Queue points=" + remaining.size() + ", search radius=" + FlightConfig.searchRadius
+                + ", hunt=" + FlightConfig.hunt + ", shulkers=" + FlightConfig.useShulkers);
+    }
+
+    public static boolean isPausedAfterLandingFailure() { return state == State.PAUSED_FAILURE; }
+
+    public static void resumeAfterLandingFailure(MinecraftClient client) {
+        if (state != State.PAUSED_FAILURE || client == null || client.player == null) return;
+        if (target == null || !remaining.contains(target)) {
+            state = State.IDLE;
+            start(client);
+            return;
+        }
+        landingAttempts = 0;
+        landFails = 0;
+        debug(client, "User resumed failed destination " + target.name + " at " + target.x + ", " + target.z);
+        beginTakeoff();
+        msg(client, "Auto Elytra: retrying " + target.name);
     }
 
     public static void stop(MinecraftClient client, String message) {
@@ -167,6 +193,8 @@ public final class FlightRunner {
     private static void resetLeg() {
         chunkSeen = 0;
         landFails = 0;
+        landingAttempts = 0;
+        shipRoofY = Double.NaN;
         nearGroundTicks = 0;
         scoutDone = false;
         orbiting = false;
@@ -212,6 +240,14 @@ public final class FlightRunner {
             return;
         }
         ticks++;
+        if (FlightConfig.debugMode && ticks - lastDebugHeartbeat >= 40) {
+            lastDebugHeartbeat = ticks;
+            debug(client, "Status=" + state + ", player=" + fmt(p.getX()) + "," + fmt(p.getY()) + "," + fmt(p.getZ())
+                    + ", target=" + (target == null ? "none" : target.name + "@" + target.x + "," + target.z)
+                    + ", speed=" + fmt(p.getVelocity().length()) + ", rockets=" + countRockets(p)
+                    + ", shulkers=" + lastShulkerCount + ", verdict=" + lastShipVerdict + ", frames=" + lastFrameCount
+                    + ", searchRadius=" + FlightConfig.searchRadius + ", attempts=" + landingAttempts + "/3");
+        }
         flown += Math.hypot(p.getX() - lastX, p.getZ() - lastZ);
         lastX = p.getX();
         lastZ = p.getZ();
@@ -425,7 +461,7 @@ public final class FlightRunner {
         } else if (frameTarget != null && !frameTarget.isRemoved()) {
             tx = frameTarget.getX();
             tz = frameTarget.getZ();
-            refY = Math.floor(frameTarget.getY());
+            refY = Double.isNaN(shipRoofY) ? Math.floor(frameTarget.getY()) : shipRoofY;
         } else if (spotSet) {
             tx = spotX;
             tz = spotZ;
@@ -462,19 +498,27 @@ public final class FlightRunner {
                             ItemFrameEntity f = findElytraFrame(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
                             if (f != null) {
                                 frameTarget = f;
+                                shipRoofY = estimateShipRoofY(client, f.getX(), f.getZ(), 12);
+                                refY = Double.isNaN(shipRoofY) ? Math.floor(f.getY()) : shipRoofY;
                                 scoutDone = true;
+                                debug(client, "Elytra frame found at " + target.name + " frame=" + fmt(f.getX()) + "," + fmt(f.getY()) + "," + fmt(f.getZ()) + " roofY=" + fmt(shipRoofY));
                                 msg(client, "Auto Elytra: elytra frame seen at " + target.name + ", going down");
                             }
                         }
                         if (!scoutDone && FlightConfig.useShulkers) {
                             ShulkerScan scan = scanShulkers(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
                             rememberScan(scan);
+                            lastFrameCount = countFrames(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
+                            debug(client, "Air scan: shulkers=" + scan.shulkers.size() + ", verdict=" + scan.verdict
+                                    + ", frames=" + lastFrameCount + ", radius=" + FlightConfig.searchRadius);
                             if (scan.verdict.equals("untouched")) {
                                 spotX = scan.centerX;
                                 spotZ = scan.centerZ;
-                                refY = scan.centerY;
+                                shipRoofY = estimateShipRoofY(client, scan.centerX, scan.centerZ, 12);
+                                refY = Double.isNaN(shipRoofY) ? scan.centerY : shipRoofY;
                                 spotSet = true;
                                 scoutDone = true;
+                                debug(client, "Untouched ship shape at " + target.name + "; roofY=" + fmt(shipRoofY) + ", landing center=" + fmt(spotX) + "," + fmt(spotZ));
                                 msg(client, "Auto Elytra: untouched ship shape found at " + target.name + ", going down");
                             } else if (scan.verdict.equals("looted")) {
                                 skipPoint(client, "looted", "looks looted (shulker shape does not match)");
@@ -516,6 +560,15 @@ public final class FlightRunner {
 
         float pitch;
         if (state == State.LAND) {
+            if (!Double.isNaN(shipRoofY) && p.getY() < shipRoofY + 8 && !p.isOnGround()) {
+                if (ticks - lastRocket > 25 && speed < 2.0) {
+                    debug(client, "Below safe roof approach altitude: playerY=" + fmt(p.getY()) + ", roofY=" + fmt(shipRoofY) + "; firing recovery rocket");
+                    useRocket(client);
+                }
+                p.setYaw((float) Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ())));
+                p.setPitch(-18f);
+                return;
+            }
             double gb = groundBelow(client, p, 120);                          // real ground under us
             double alt = p.getY() - refY;                                     // height over the landing spot
             double above = Double.isNaN(gb) ? alt : p.getY() - gb;            // height over the ground below
@@ -563,11 +616,13 @@ public final class FlightRunner {
             if (rocketCheckAt == 0) {
                 if (ticks - lastRocket >= 5) {
                     if (rocketTries >= 3) {
+                        debug(client, "First rocket failed verification after 3 attempts; stopping flight");
                         stop(client, "Auto Elytra: the first rocket does nothing (3 tries) - check your hotbar rockets");
                         return;
                     }
                     rocketSpeedBefore = speed;
                     rocketTries++;
+                    debug(client, "First rocket attempt " + rocketTries + "/3 at " + fmt(p.getX()) + "," + fmt(p.getY()) + "," + fmt(p.getZ()));
                     if (useRocket(client)) rocketCheckAt = ticks + 6;
                 }
             } else if (ticks >= rocketCheckAt) {
@@ -584,6 +639,10 @@ public final class FlightRunner {
 
     private static void enterLand() {
         state = State.LAND;
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null) debug(client, "Landing phase entered: player=" + fmt(client.player.getX())
+                + "," + fmt(client.player.getY()) + "," + fmt(client.player.getZ())
+                + ", roofY=" + fmt(shipRoofY) + ", destination=" + (target == null ? "none" : target.name));
         orbiting = false;
         nearGroundTicks = 0;
     }
@@ -616,20 +675,21 @@ public final class FlightRunner {
         }
         ClientPlayerEntity p = client.player;
         boolean onFrame = frameTarget != null && !frameTarget.isRemoved();
+        if (onFrame && Double.isNaN(shipRoofY)) {
+            shipRoofY = estimateShipRoofY(client, frameTarget.getX(), frameTarget.getZ(), 12);
+        }
         double radius = onFrame ? FRAME_LAND_RADIUS : FlightConfig.landRadius;
-        if (dist > radius) {          // landed too far from the point (or the ship): take off again
-            if (++landFails >= 3) {
-                if (onFrame) {
-                    found(client, "could not land on the ship, you are " + (int) dist + " blocks from the frame");
-                    return;
-                }
-                msg(client, "Auto Elytra: " + target.name + " cannot be reached, skipped");
-                markPoint("unreachable");
-                remaining.remove(target);
-                enterPause(client);
-                return;
-            }
-            beginTakeoff();
+        boolean expectedShip = FlightConfig.hunt && (onFrame || !Double.isNaN(shipRoofY));
+        boolean onShipRoof = !expectedShip || (!Double.isNaN(shipRoofY)
+                && p.getY() >= shipRoofY - 1.5 && dist <= radius);
+        debug(client, "Touchdown check: position=" + fmt(p.getX()) + "," + fmt(p.getY()) + "," + fmt(p.getZ())
+                + ", distance=" + fmt(dist) + ", roofY=" + fmt(shipRoofY) + ", onShipRoof=" + onShipRoof);
+        if (expectedShip && !onShipRoof) {
+            retryLanding(client, Double.isNaN(shipRoofY) ? "ship roof height could not be confirmed" : "landed below or away from the ship roof");
+            return;
+        }
+        if (dist > radius) {
+            retryLanding(client, "touchdown distance " + fmt(dist) + " exceeds " + fmt(radius));
             return;
         }
         if (FlightConfig.hunt) {
@@ -637,31 +697,58 @@ public final class FlightRunner {
                 found(client, null);
                 return;
             }
-            // Recheck at close range. An empty-looking frame is NOT proof that a ship is looted.
             ItemFrameEntity f = findElytraFrame(client, p.getX(), p.getZ(), FlightConfig.searchRadius);
             if (f != null) {
                 frameTarget = f;
+                shipRoofY = estimateShipRoofY(client, f.getX(), f.getZ(), 12);
+                if (Double.isNaN(shipRoofY) || p.getY() < shipRoofY - 1.5) {
+                    refY = shipRoofY;
+                    retryLanding(client, "elytra frame found, but touchdown was not confirmed on the ship roof");
+                    return;
+                }
                 found(client, null);
                 return;
             }
             if (FlightConfig.useShulkers) {
                 ShulkerScan scan = scanShulkers(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
                 rememberScan(scan);
+                debug(client, "Close shulker check: count=" + scan.shulkers.size() + ", verdict=" + scan.verdict + ", frames=" + countFrames(client, target.x + .5, target.z + .5, FlightConfig.searchRadius));
                 if (scan.verdict.equals("untouched")) {
+                    shipRoofY = estimateShipRoofY(client, scan.centerX, scan.centerZ, 12);
+                    if (Double.isNaN(shipRoofY) || p.getY() < shipRoofY - 1.5) {
+                        spotX = scan.centerX;
+                        spotZ = scan.centerZ;
+                        spotSet = true;
+                        refY = shipRoofY;
+                        retryLanding(client, "untouched ship confirmed, but touchdown was below its roof");
+                        return;
+                    }
                     found(client, "three shulkers match the ship");
                     return;
                 }
                 if (scan.verdict.equals("looted")) {
+                    double nearbyRoof = estimateShipRoofY(client, p.getX(), p.getZ(), 12);
+                    if (Double.isNaN(nearbyRoof) || p.getY() < nearbyRoof - 1.5) {
+                        shipRoofY = nearbyRoof;
+                        retryLanding(client, "possible looted ship detected, but touchdown was not confirmed on its roof");
+                        return;
+                    }
                     msg(client, "Auto Elytra: " + target.name + " looks looted (shulkers missing or moved), skipped");
+                    debug(client, "Destination marked looted. It stays in the queue; use Reactivate to try again.");
                     markPoint("looted");
                     remaining.remove(target);
                     enterPause(client);
                     return;
                 }
             }
-            // No shulkers were sent by the server: unknown. Do not save a result, so this
-            // point can be tried again later (for example with a larger mob tracking range).
+            double possibleRoof = estimateShipRoofY(client, target.x + 0.5, target.z + 0.5, 12);
+            if (!Double.isNaN(possibleRoof) && p.getY() < possibleRoof - 1.5) {
+                shipRoofY = possibleRoof;
+                retryLanding(client, "touchdown was below the highest nearby ship surface; detection is still unknown");
+                return;
+            }
             msg(client, "Auto Elytra: " + target.name + " is unknown (no visible elytra frame or shulkers); will retry next run");
+            debug(client, "Destination verdict unknown. Not marked complete.");
             remaining.remove(target);
             enterPause(client);
             return;
@@ -671,9 +758,26 @@ public final class FlightRunner {
         enterPause(client);
     }
 
+    /** Retry a ship landing without marking the destination complete. Three failed attempts pause the queue. */
+    private static void retryLanding(MinecraftClient client, String reason) {
+        landingAttempts++;
+        if (landingAttempts >= 3) {
+            state = State.PAUSED_FAILURE;
+            client.options.jumpKey.setPressed(false);
+            client.options.forwardKey.setPressed(false);
+            debug(client, "Landing attempt 3 failed: " + reason + ". Queue paused; destination remains active.");
+            msg(client, "Auto Elytra: could not land on " + target.name + " after 3 tries (" + reason + "). Queue paused. Press Start to retry.");
+            return;
+        }
+        debug(client, "Landing attempt " + landingAttempts + "/3 failed: " + reason + ". Taking off for another approach.");
+        msg(client, "Auto Elytra: " + reason + " - retry " + (landingAttempts + 1) + "/3");
+        beginTakeoff();
+    }
+
     /** An elytra frame is here: remember the point, ring the alert and stop so the player takes the elytra. */
     private static void found(MinecraftClient client, String note) {
         String name = target != null ? target.name : "point";
+        debug(client, "Confirmed elytra at " + name + "; marking destination and stopping queue");
         markPoint("elytra");
         if (target != null) remaining.remove(target);
         foundThisRun++;
@@ -733,10 +837,33 @@ public final class FlightRunner {
         }
     }
 
+    private static void debug(MinecraftClient client, String text) {
+        if (FlightConfig.debugMode && client != null && client.player != null) {
+            client.player.sendMessage(Text.literal("[Auto Elytra DEBUG] " + text), false);
+        }
+    }
+
+    private static String fmt(double value) {
+        return Double.isNaN(value) || Double.isInfinite(value) ? "unknown" : String.format(Locale.ROOT, "%.1f", value);
+    }
+
+    /** Finds the highest loaded solid surface near the detected ship; this is used as its roof level. */
+    private static double estimateShipRoofY(MinecraftClient client, double x, double z, int radius) {
+        int highest = -1;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                int top = groundAt(client, (int) Math.floor(x) + dx, (int) Math.floor(z) + dz);
+                if (top > highest) highest = top;
+            }
+        }
+        return highest < 0 ? Double.NaN : highest;
+    }
+
     /** Drops the current point while flying and goes on to the next one. */
     private static void skipPoint(MinecraftClient client, String result, String text) {
         if (target != null) {
             msg(client, "Auto Elytra: " + target.name + " " + text + ", skipped");
+            debug(client, "Skipping destination: " + text + "; result=" + result);
             markPoint(result);
             remaining.remove(target);
         }
@@ -1009,6 +1136,7 @@ public final class FlightRunner {
         client.interactionManager.interactItem(p, Hand.MAIN_HAND);
         rocketsUsed++;
         lastRocket = ticks;
+        debug(client, "Rocket fired from hotbar slot " + slot + "; remaining=" + countRockets(p));
         return true;
     }
 
@@ -1082,6 +1210,8 @@ public final class FlightRunner {
             lines.add(String.format(Locale.ROOT, "To %s  %d blocks", target.name, (int) distanceTo(c.player, target)));
         }
         if (state == State.PAUSE) lines.add("Next leg in " + (pauseLeft / 20 + 1) + " s");
+        if (state == State.PAUSED_FAILURE) lines.add("Landing failed after 3 tries - press Start to retry");
+        if (state == State.LAND && !Double.isNaN(shipRoofY)) lines.add("Ship roof Y " + (int) shipRoofY + " | Attempts " + landingAttempts + "/3");
         ItemStack e = c.player.getEquippedStack(EquipmentSlot.CHEST);
         lines.add("Rockets " + countRockets(c.player) + "  Elytra " + (e.isOf(Items.ELYTRA) ? (e.getMaxDamage() - e.getDamage()) : 0)
                 + "  Left " + remaining.size());

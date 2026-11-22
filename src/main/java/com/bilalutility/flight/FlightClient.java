@@ -31,7 +31,9 @@ public class FlightClient implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (toggleKey.wasPressed()) {
-                if (FlightRunner.isRunning()) {
+                if (FlightRunner.isPausedAfterLandingFailure()) {
+                    FlightRunner.resumeAfterLandingFailure(client);
+                } else if (FlightRunner.isRunning()) {
                     FlightRunner.stop(client, "Auto Elytra stopped");
                 } else if (client.world != null && client.currentScreen == null) {
                     FlightRunner.start(client);
