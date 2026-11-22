@@ -83,7 +83,7 @@ public final class FlightRunner {
     private static final double[] SHIP_SHAPE = {6.40, 19.21, 20.35};
     private static final double SHAPE_TOLERANCE = 1.5;
 
-    private static final double SHIP_LAND_RADIUS = 10;   // any solid ship surface within this radius counts as touchdown
+    private static final double SHIP_LAND_RADIUS = 14;   // usable ship body footprint around the body centre
 
     // ship detection / landing state of the current leg
     private static boolean shipLanding;
@@ -492,8 +492,8 @@ public final class FlightRunner {
             tz = islandZ + 0.5;
             refY = islandY;
         } else if (shipLanding && spotSet) {
-            // Once the ship is confirmed, navigate to the detected ship centre (third shulker),
-            // not the item frame. The frame is evidence of an elytra, not the landing target.
+            // Once the ship is confirmed, navigate to the hull-body midpoint,
+            // not the item frame or the third shulker at the frame end.
             tx = spotX;
             tz = spotZ;
         } else if (frameTarget != null && !frameTarget.isRemoved()) {
@@ -596,7 +596,74 @@ public final class FlightRunner {
 
         float pitch;
         if (state == State.LAND) {
-            // Recovery remains deliberately conservative: never rocket merely because we are
+            // Ship landing is a straight, committed pass over the BODY of the ship.
+            // Do not orbit the shulker/frame, and do not fire rockets near the hull.
+            if (shipLanding) {
+                double roof = Double.isNaN(shipRoofY) ? refY : shipRoofY;
+                double height = p.getY() - roof;
+                double horizontalSpeed = Math.hypot(v.x, v.z);
+                double desiredYaw = Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
+                p.setYaw((float) desiredYaw); // immediate correction: avoid the wide rate-limited orbit
+                double aimY = roof + (dist > 25.0 ? 4.0 : 1.0);
+                double lineHeight = p.getY() - aimY;
+                double desiredPitch = Math.toDegrees(Math.atan2(lineHeight, Math.max(1.0, dist)));
+                pitch = (float) clamp(desiredPitch, -12, 32);
+                if (speed > 2.6 && pitch > 10) pitch = 10f;
+
+                // Keep the old recovery rule, but only allow a rocket when genuinely far
+                // from the confirmed ship. Never boost into the hull during the final approach.
+                boolean needsRecovery = !Double.isNaN(roof) && !p.isOnGround()
+                        && dist > 80 && p.getY() < roof - 1.5;
+                if (needsRecovery && ticks - lastRocket > 60 && speed < 1.2 && recoveryRockets < 2) {
+                    recoveryRockets++;
+                    debug(client, "Far-below-ship recovery rocket " + recoveryRockets + "/2");
+                    useRocket(client);
+                }
+
+                // Start braking much earlier. A long, straight flare gives horizontal
+                // momentum time to bleed off before the player reaches the deck.
+                if (dist <= 85 && height >= 2.0 && height <= 30.0 && horizontalSpeed > 0.8) {
+                    pitch = -25f;
+                    p.setPitch(pitch);
+                    landDecision(client, dist, height, horizontalSpeed, pitch, "straight braking pass");
+                    return;
+                }
+
+                // Swap as soon as the player is over the deck, low, slow, and the complete
+                // predicted fall corridor is confirmed to be ship deck (never void).
+                if (FlightConfig.shipLandingChestplateDrop && hasInventoryChestplate(p)
+                        && dist <= 9.0 && height >= 1.5 && height <= 5.5
+                        && horizontalSpeed < 0.8) {
+                    String refusal = shipDropRefusal(client, p, tx, tz, roof, horizontalSpeed);
+                    if (refusal == null && equipChestplate(client)) {
+                        shipDropActive = true;
+                        client.options.jumpKey.setPressed(false);
+                        debug(client, "Ship chestplate drop SWAPPED: safe deck corridor confirmed");
+                        landDecision(client, dist, height, horizontalSpeed, pitch, "chestplate swap");
+                        return;
+                    }
+                    if (refusal == null) refusal = "chestplate inventory swap did not complete";
+                    pitch = -18f;
+                    p.setPitch(pitch);
+                    landDecision(client, dist, height, horizontalSpeed, pitch, "swap refused: " + refusal);
+                    // Do not launch another tight orbit or fire a rocket. Keep the glide
+                    // controlled while the player remains over the ship; never blind-drop.
+                }
+
+                // If no chestplate is available, or the swap is disabled/refused, make a
+                // controlled descent onto the body instead of circling the item frame.
+                if (!FlightConfig.shipLandingChestplateDrop || !hasInventoryChestplate(p)) {
+                    if (dist <= 18 && height <= 8) pitch = 22f;
+                }
+                p.setPitch(pitch);
+                landDecision(client, dist, height, horizontalSpeed, pitch,
+                        shipDropActive ? "chestplate drop active"
+                                : (!hasInventoryChestplate(p) ? "normal landing fallback" : "straight ship approach"));
+                return;
+            }
+
+            // Recovery remains deliberately conservative for ordinary island/waypoint landing.
+            // Never rocket merely because we are below a ship while already close to its roof.
             // below a ship while already close to its roof.
             boolean needsRecovery = !Double.isNaN(shipRoofY) && !p.isOnGround()
                     && (shipLanding
@@ -757,43 +824,47 @@ public final class FlightRunner {
         return false;
     }
 
-    /** Null means safe. Every sampled column must be loaded and have a solid surface at roof level. */
+    /** Null means safe. The player and predicted impact must stay over the ship deck. */
     private static String shipDropRefusal(MinecraftClient client, ClientPlayerEntity p,
                                            double tx, double tz, double roof, double horizontalSpeed) {
         if (horizontalSpeed >= 0.8) return "horizontal speed is not below 0.8";
-        double gb = groundBelow(client, p, 12);
-        if (Double.isNaN(gb) || p.getY() - gb > 5.5) return "no solid ground directly below";
+
+        double under = groundBelow(client, p, 8);
+        if (Double.isNaN(under) || Math.abs(under - roof) > 2.5 || p.getY() - under > 5.5)
+            return "no ship deck directly below the player";
+
+        // At this low speed, six ticks is a conservative estimate of the fall drift.
         double impactX = p.getX() + p.getVelocity().x * 6.0;
         double impactZ = p.getZ() + p.getVelocity().z * 6.0;
-        double[][] anchors = {{p.getX(), p.getZ()}, {impactX, impactZ}};
-        for (double[] a : anchors) {
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dz = -2; dz <= 2; dz++) {
-                    int x = (int) Math.floor(a[0]) + dx;
-                    int z = (int) Math.floor(a[1]) + dz;
-                    if (!chunkLoaded(client, x, z)) return "predicted drop area is not loaded";
-                    int top = groundAt(client, x, z);
-                    if (top < 0 || Math.abs(top - roof) > 2) return "void or roof edge in predicted drop area";
-                    if (!solid(client, x, (int) Math.floor(roof) - 1, z)
-                            && !solid(client, x, (int) Math.floor(roof), z))
-                        return "no solid roof block in predicted drop area";
-                }
+        if (Math.hypot(impactX - tx, impactZ - tz) > SHIP_LAND_RADIUS - 1.0)
+            return "predicted impact is outside the ship body";
+
+        // Check the actual drift line, not a huge 5x5 square at every point.
+        for (int i = 0; i <= 6; i++) {
+            double t = i / 6.0;
+            int x = (int) Math.floor(p.getX() + (impactX - p.getX()) * t);
+            int z = (int) Math.floor(p.getZ() + (impactZ - p.getZ()) * t);
+            if (!chunkLoaded(client, x, z)) return "drop corridor is not loaded";
+            int top = groundAt(client, x, z);
+            if (top < 0 || Math.abs(top - roof) > 2
+                    || (!solid(client, x, (int) Math.floor(roof) - 1, z)
+                    && !solid(client, x, (int) Math.floor(roof), z))) {
+                return "gap or void along predicted drop corridor";
             }
         }
-        // Sample the corridor between current and predicted impact positions.
-        for (int i = 1; i < 6; i++) {
-            double x = p.getX() + (impactX - p.getX()) * i / 6.0;
-            double z = p.getZ() + (impactZ - p.getZ()) * i / 6.0;
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dz = -2; dz <= 2; dz++) {
-                    int sx = (int) Math.floor(x) + dx;
-                    int sz = (int) Math.floor(z) + dz;
-                    if (!chunkLoaded(client, sx, sz)) return "corridor margin is not loaded";
-                    int top = groundAt(client, sx, sz);
-                    if (top < 0 || Math.abs(top - roof) > 2) return "gap or roof edge between player and predicted impact";
-                    if (!solid(client, sx, (int) Math.floor(roof) - 1, sz)
-                            && !solid(client, sx, (int) Math.floor(roof), sz))
-                        return "non-solid block in predicted drop corridor";
+
+        // Keep a two-block margin around the final impact point only. Requiring that
+        // margin along the entire corridor rejected almost every real End Ship deck.
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                int x = (int) Math.floor(impactX) + dx;
+                int z = (int) Math.floor(impactZ) + dz;
+                if (!chunkLoaded(client, x, z)) return "impact safety margin is not loaded";
+                int top = groundAt(client, x, z);
+                if (top < 0 || Math.abs(top - roof) > 2
+                        || (!solid(client, x, (int) Math.floor(roof) - 1, z)
+                        && !solid(client, x, (int) Math.floor(roof), z))) {
+                    return "void or roof edge inside impact safety margin";
                 }
             }
         }
@@ -807,7 +878,7 @@ public final class FlightRunner {
         p.setYaw(cur + Math.max(-maxStep, Math.min(maxStep, diff)));
     }
 
-    /** A ship is confirmed: the landing centre is the third shulker (or the elytra frame); land on the roof above it. */
+    /** A ship is confirmed: aim for the middle of the hull between the rear shulker pair and third shulker. */
     private static void setShipLanding(MinecraftClient client, double x, double y, double z, String why) {
         spotX = x;
         spotZ = z;
@@ -819,10 +890,10 @@ public final class FlightRunner {
         scoutDone = true;
         firstRocketPending = false;
         rocketCheckAt = 0;
-        shipRoofY = estimateShipRoofY(client, x, z, 3);
+        shipRoofY = estimateShipRoofY(client, x, z, 5);
         refY = Double.isNaN(shipRoofY) ? y : shipRoofY;
-        debug(client, "Ship confirmed (" + why + "): landing centre=" + fmt(x) + "," + fmt(z)
-                + ", shulker/frame y=" + fmt(y) + ", roofY=" + fmt(shipRoofY));
+        debug(client, "Ship confirmed (" + why + "): body centre=" + fmt(x) + "," + fmt(z)
+                + ", roofY=" + fmt(shipRoofY));
         msg(client, "Auto Elytra: untouched ship at " + target.name + " (" + why + "), going down");
     }
 
@@ -857,6 +928,25 @@ public final class FlightRunner {
         return spotSet;
     }
 
+    private static boolean isShipDeckTouchdown(MinecraftClient client, ClientPlayerEntity p, double dist) {
+        double surface = groundBelow(client, p, 3);
+        double roof = Double.isNaN(shipRoofY) ? refY : shipRoofY;
+        return !Double.isNaN(surface) && !Double.isNaN(roof)
+                && Math.abs(p.getY() - surface) <= 0.75
+                && surface >= roof - 2.0 && surface <= roof + 6.0
+                && dist <= SHIP_LAND_RADIUS;
+    }
+
+    private static void pauseUnsafeShipTouchdown(MinecraftClient client, String reason) {
+        state = State.PAUSED_FAILURE;
+        if (client != null && client.options != null) {
+            client.options.jumpKey.setPressed(false);
+            client.options.forwardKey.setPressed(false);
+        }
+        debug(client, "Ship landing stopped without retry: " + reason);
+        msg(client, "Auto Elytra: " + reason + " - paused safely; no retry rockets");
+    }
+
     private static void arrived(MinecraftClient client, double dist) {
         if (emergency) {
             if (FlightConfig.landWithChestplate) equipChestplate(client);
@@ -865,27 +955,25 @@ public final class FlightRunner {
         }
         ClientPlayerEntity p = client.player;
 
-        // Any actual solid ship block counts as touchdown. The ship roof estimate is
-        // for steering/swap safety only; raised decorations must not invalidate landing.
+        // A ship touchdown is valid only on a real block at deck height inside the hull.
         if (shipLanding) {
             double surface = groundBelow(client, p, 3);
-            boolean standingOnBlock = !Double.isNaN(surface)
-                    && Math.abs(p.getY() - surface) <= 0.75;
+            double roof = Double.isNaN(shipRoofY) ? refY : shipRoofY;
+            boolean validDeck = isShipDeckTouchdown(client, p, dist);
             debug(client, "Ship touchdown: distance=" + fmt(dist) + ", playerY=" + fmt(p.getY())
-                    + ", solidSurfaceY=" + fmt(surface) + ", groundedBlock=" + standingOnBlock);
-            if (standingOnBlock && dist <= SHIP_LAND_RADIUS) {
-                found(client, "landed on the ship");
+                    + ", surfaceY=" + fmt(surface) + ", roofY=" + fmt(roof)
+                    + ", validDeck=" + validDeck);
+            if (validDeck) {
+                found(client, "landed on the ship body");
                 return;
             }
-            retryLanding(client, !standingOnBlock
-                    ? "player is not standing on a solid ship block"
-                    : "touchdown outside the ship footprint");
+            pauseUnsafeShipTouchdown(client, "touchdown was not on the ship deck");
             return;
         }
 
         boolean onFrame = frameTarget != null && !frameTarget.isRemoved();
         if (onFrame && Double.isNaN(shipRoofY)) {
-            shipRoofY = estimateShipRoofY(client, frameTarget.getX(), frameTarget.getZ(), 3);
+            shipRoofY = estimateShipRoofY(client, frameTarget.getX(), frameTarget.getZ(), 5);
         }
         double radius = onFrame ? SHIP_LAND_RADIUS : FlightConfig.landRadius;
         boolean expectedShip = FlightConfig.hunt && (onFrame || shipLanding);
@@ -897,26 +985,31 @@ public final class FlightRunner {
                 + ", shipDistance=" + fmt(dist) + ", roofY=" + fmt(shipRoofY)
                 + ", solidUnderPlayer=" + solidUnderPlayer + ", onShipRoof=" + onShipRoof);
         if (expectedShip && !onShipRoof) {
-            retryLanding(client, Double.isNaN(shipRoofY) ? "ship roof height could not be confirmed"
-                    : (!solidUnderPlayer ? "no solid ship block directly under player" : "landed below or away from the ship"));
+            String reason = Double.isNaN(shipRoofY) ? "ship roof height could not be confirmed"
+                    : (!solidUnderPlayer ? "no solid ship block directly under player" : "landed below or away from the ship");
+            if (onFrame) pauseUnsafeShipTouchdown(client, reason);
+            else retryLanding(client, reason);
             return;
         }
         if (dist > radius) {
-            retryLanding(client, "touchdown distance " + fmt(dist) + " exceeds " + fmt(radius));
+            String reason = "touchdown distance " + fmt(dist) + " exceeds " + fmt(radius);
+            if (onFrame) pauseUnsafeShipTouchdown(client, reason);
+            else retryLanding(client, reason);
             return;
         }
         if (FlightConfig.hunt) {
             if (onFrame) {
-                found(client, null);
+                if (isShipDeckTouchdown(client, p, dist)) found(client, null);
+                else pauseUnsafeShipTouchdown(client, "elytra frame found but player is not on the ship deck");
                 return;
             }
             ItemFrameEntity f = findElytraFrame(client, p.getX(), p.getZ(), FlightConfig.searchRadius);
             if (f != null) {
                 frameTarget = f;
-                shipRoofY = estimateShipRoofY(client, f.getX(), f.getZ(), 3);
-                if (Double.isNaN(shipRoofY) || p.getY() < shipRoofY - 1.5) {
-                    refY = shipRoofY;
-                    retryLanding(client, "elytra frame found, but touchdown was not confirmed on the ship roof");
+                shipRoofY = estimateShipRoofY(client, f.getX(), f.getZ(), 5);
+                if (Double.isNaN(shipRoofY) || p.getY() < shipRoofY - 1.5
+                        || !isShipDeckTouchdown(client, p, dist)) {
+                    pauseUnsafeShipTouchdown(client, "elytra frame found but touchdown is not on the ship deck");
                     return;
                 }
                 found(client, null);
@@ -927,23 +1020,31 @@ public final class FlightRunner {
                 rememberScan(scan);
                 debug(client, "Close shulker check: count=" + scan.shulkers.size() + ", verdict=" + scan.verdict + ", frames=" + countFrames(client, target.x + .5, target.z + .5, FlightConfig.searchRadius));
                 if (scan.verdict.equals("untouched")) {
-                    shipRoofY = estimateShipRoofY(client, scan.centerX, scan.centerZ, 3);
+                    shipRoofY = estimateShipRoofY(client, scan.centerX, scan.centerZ, 5);
                     if (Double.isNaN(shipRoofY) || p.getY() < shipRoofY - 1.5) {
                         spotX = scan.centerX;
                         spotZ = scan.centerZ;
                         spotSet = true;
                         refY = shipRoofY;
-                        retryLanding(client, "untouched ship confirmed, but touchdown was below its roof");
+                        pauseUnsafeShipTouchdown(client, "untouched ship detected but touchdown is below its deck");
                         return;
                     }
-                    found(client, "three shulkers match the ship");
+                    if (isShipDeckTouchdown(client, p, dist)) {
+                        found(client, "three shulkers match the ship");
+                    } else {
+                        pauseUnsafeShipTouchdown(client, "ship detected but touchdown is not on its deck");
+                    }
                     return;
                 }
                 if (scan.verdict.equals("looted")) {
                     double nearbyRoof = estimateShipRoofY(client, p.getX(), p.getZ(), 12);
                     if (Double.isNaN(nearbyRoof) || p.getY() < nearbyRoof - 1.5) {
                         shipRoofY = nearbyRoof;
-                        retryLanding(client, "possible looted ship detected, but touchdown was not confirmed on its roof");
+                        pauseUnsafeShipTouchdown(client, "possible looted ship detected but touchdown is not on its deck");
+                        return;
+                    }
+                    if (!isShipDeckTouchdown(client, p, dist)) {
+                        pauseUnsafeShipTouchdown(client, "possible ship found but touchdown is not on its deck");
                         return;
                     }
                     msg(client, "Auto Elytra: " + target.name + " looks looted (shulkers missing or moved), skipped");
@@ -957,7 +1058,7 @@ public final class FlightRunner {
             double possibleRoof = estimateShipRoofY(client, target.x + 0.5, target.z + 0.5, 12);
             if (!Double.isNaN(possibleRoof) && p.getY() < possibleRoof - 1.5) {
                 shipRoofY = possibleRoof;
-                retryLanding(client, "touchdown was below the highest nearby ship surface; detection is still unknown");
+                pauseUnsafeShipTouchdown(client, "touchdown was below the nearby ship deck; detection remains unknown");
                 return;
             }
             msg(client, "Auto Elytra: " + target.name + " is unknown (no visible elytra frame or shulkers); will retry next run");
@@ -973,6 +1074,10 @@ public final class FlightRunner {
 
     /** Retry a ship landing without marking the destination complete. Three failed attempts pause the queue. */
     private static void retryLanding(MinecraftClient client, String reason) {
+        if (shipLanding) {
+            pauseUnsafeShipTouchdown(client, reason);
+            return;
+        }
         landingAttempts++;
         if (landingAttempts >= 3) {
             state = State.PAUSED_FAILURE;
@@ -1145,7 +1250,7 @@ public final class FlightRunner {
      *  - The third shulker (next to the elytra frame, about 19.21 / 20.35 from the back pair) decides:
      *    in place = untouched, missing (killed) or moved (mined under it) = looted.
      *  - Fewer than two shulkers, or no back pair = unknown (never "looted").
-     * The centre of an untouched ship is the third shulker (the landing spot).
+     * The landing target is the midpoint between the third shulker and the rear-pair midpoint.
      */
     private static ShulkerScan scanShulkers(MinecraftClient client, double x, double z, double radius) {
         double bottom = client.world.getBottomY();
@@ -1191,7 +1296,11 @@ public final class FlightRunner {
         }
         if (third != null) {
             lastScanNote = "back pair + third in place (error " + fmt(bestThird) + ")";
-            return new ShulkerScan(found, "untouched", third.getX(), third.getY(), third.getZ(), bestThird);
+            // The third shulker is near the elytra/frame end, not the middle of the hull.
+            // The midpoint between it and the rear-pair midpoint is a much better deck target.
+            double bodyX = (pcx + third.getX()) * 0.5;
+            double bodyZ = (pcz + third.getZ()) * 0.5;
+            return new ShulkerScan(found, "untouched", bodyX, third.getY(), bodyZ, bestThird);
         }
         lastScanNote = otherNearby ? "back pair found, third shulker moved (mined under it)"
                 : "back pair found, third shulker missing (killed)";
