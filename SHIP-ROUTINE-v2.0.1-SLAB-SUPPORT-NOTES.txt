@@ -1,0 +1,18 @@
+Bilal Utility v2.0.1 ship movement support update
+
+- Movement footing now checks the actual collision-shape top against the
+  player's real feet height. Half-height purpur slabs are therefore accepted
+  when the player is standing at slab height.
+- Ship materials recognised: purpur blocks, purpur stairs, purpur pillars,
+  purpur slabs, end stone bricks, obsidian, ladders, magenta stained glass,
+  magenta stained glass panes, and end rods.
+- Safe floor support is limited to recognised blocks with collision shapes.
+  Ladders are recognised as climbing aids, not floor. End rods are recognised
+  as lights, not floor. Glass panes are accepted only where their actual
+  collision shape supports the checked point.
+- Existing void guard remains active; it still refuses movement when no
+  matching ship surface is found ahead at the player's current height.
+
+Build status: NOT VERIFIED. Gradle is not installed in the build environment.
+Please run ./gradlew build and share any compiler output if it fails.
+In-game testing is still required, especially on the Folia server.

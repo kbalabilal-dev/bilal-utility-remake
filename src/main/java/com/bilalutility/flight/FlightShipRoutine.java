@@ -296,14 +296,48 @@ public final class FlightShipRoutine {
     }
 
     private static boolean hasFootingAhead(MinecraftClient client, ClientPlayerEntity p, double dirX, double dirZ) {
+        // Check the real top surface of the block ahead. This deliberately uses the
+        // player's actual feet height, so a half-height purpur slab is valid footing.
         double x = p.getX() + dirX * 0.65;
         double z = p.getZ() + dirZ * 0.65;
-        int baseY = MathHelper.floor(p.getY() - 0.15);
+        double feetY = p.getY();
+        int baseY = MathHelper.floor(feetY);
         for (int y = baseY - 1; y <= baseY + 1; y++) {
             BlockPos support = new BlockPos(MathHelper.floor(x), y, MathHelper.floor(z));
-            if (!client.world.getBlockState(support).getCollisionShape(client.world, support).isEmpty()) return true;
+            if (!isShipWalkSurface(client, support)) continue;
+            var shape = client.world.getBlockState(support).getCollisionShape(client.world, support);
+            for (net.minecraft.util.math.Box box : shape.getBoundingBoxes()) {
+                double topY = y + box.maxY;
+                if (Math.abs(topY - feetY) <= 0.70
+                        && x >= support.getX() + box.minX - 0.05
+                        && x <= support.getX() + box.maxX + 0.05
+                        && z >= support.getZ() + box.minZ - 0.05
+                        && z <= support.getZ() + box.maxZ + 0.05) {
+                    return true;
+                }
+            }
         }
         return false;
+    }
+
+    /** Ship materials that can provide a collision surface for walking. Ladders are
+     * recognised as ship material but are not counted as floor; end rods are lights,
+     * not safe support blocks. The collision shape still decides whether a surface exists. */
+    private static boolean isShipMaterial(MinecraftClient client, BlockPos pos) {
+        String id = Registries.BLOCK.getId(client.world.getBlockState(pos).getBlock()).getPath();
+        return id.equals("purpur_block") || id.equals("purpur_stairs")
+                || id.equals("purpur_pillar") || id.equals("purpur_slab")
+                || id.equals("end_stone_bricks") || id.equals("obsidian")
+                || id.equals("ladder") || id.equals("magenta_stained_glass")
+                || id.equals("magenta_stained_glass_pane") || id.equals("end_rod");
+    }
+
+    private static boolean isShipWalkSurface(MinecraftClient client, BlockPos pos) {
+        var state = client.world.getBlockState(pos);
+        if (!isShipMaterial(client, pos) || state.getCollisionShape(client.world, pos).isEmpty()) return false;
+        String id = Registries.BLOCK.getId(state.getBlock()).getPath();
+        // Ladders are climb aids, and end rods are lights: neither is floor support.
+        return !id.equals("ladder") && !id.equals("end_rod");
     }
 
     private static Vec3d findStandPosition(MinecraftClient client, BlockPos target, boolean standOnTarget) {
