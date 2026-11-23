@@ -51,7 +51,8 @@ public final class FlightRecorder {
     private FlightRecorder() {}
 
     public static void begin(MinecraftClient client) {
-        // Keep teach mode alive while the mod performs the takeoff after the ship routine.
+        // the ship routine starts the flight itself: keep teach mode running during our own take off
+        if (teach && !FlightShipRoutine.isActive()) endTeach("flight restarted");
         if (!FlightConfig.recordFlights || out != null) return;
         try {
             Path dir = FabricLoader.getInstance().getGameDir().resolve("bilal_flight_logs");
@@ -65,22 +66,21 @@ public final class FlightRecorder {
         }
     }
 
+    /** Ticks since teach mode started (or since the log started). Used by the ship routine for step times. */
+    public static long clock() {
+        return teach ? ticks - teachStart : ticks;
+    }
+
+    public static void routine(String text) {
+        if (out != null) line("ROUTINE " + text);
+    }
+
     public static void event(String text) {
         if (out != null) line("EVENT " + text);
     }
 
-    public static void routineStepStart(String name, String details) {
-        if (out != null) line("ROUTINE_STEP_START tick=" + ticks + " ms=" + System.currentTimeMillis()
-                + " name=" + name + (details == null || details.isEmpty() ? "" : " " + details));
-    }
-
-    public static void routineStepEnd(String name, String result, String details) {
-        if (out != null) line("ROUTINE_STEP_END tick=" + ticks + " ms=" + System.currentTimeMillis()
-                + " name=" + name + " result=" + result
-                + (details == null || details.isEmpty() ? "" : " " + details));
-    }
-
     public static void onStop(String message) {
+        FlightShipRoutine.onRunnerStopped(message);   // arms the ship routine after "ELYTRA FOUND"
         if (out == null) return;
         line("STOP " + (message == null ? "" : message));
         if (!teach) close();
@@ -88,6 +88,7 @@ public final class FlightRecorder {
 
     /** Called from FlightRunner.found(): from now on record what the player does by hand. */
     public static void startTeach(MinecraftClient client, double frameX, double frameY, double frameZ) {
+        FlightShipRoutine.noteFrame(frameX, frameY, frameZ);
         if (!FlightConfig.recordFlights || client.player == null || client.world == null) return;
         if (out == null) begin(client);
         if (out == null) return;
@@ -133,7 +134,7 @@ public final class FlightRecorder {
         if (p == null || client.world == null) return;
         ticks++;
         if (teach) {
-            teachTick(client, p);
+            teachTick(client, p);       // also while the ship routine takes off (the runner is not idle then)
         } else if (ticks % 20 == 0) {
             line("S " + state + " pos=" + f(p.getX()) + "," + f(p.getY()) + "," + f(p.getZ())
                     + " v=" + f(p.getVelocity().length()) + " glide=" + p.isGliding() + " gnd=" + p.isOnGround());
@@ -173,7 +174,7 @@ public final class FlightRecorder {
             line("GLIDE_START t=" + t + " (recording 5 more seconds of the take off)");
         }
         if (glideSince >= 0 && t > glideSince + 100) endTeach("player took off");
-        else if (t > 20 * 60 * 5) endTeach("timeout 5 min");
+        else if (t > 20 * 60 * 15) endTeach("timeout 15 min");
     }
 
     /** Everything else the player does: hotbar, item use (pearl, rocket), mining, teleports, damage, effects, screens. */

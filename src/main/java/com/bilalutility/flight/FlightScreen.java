@@ -8,6 +8,7 @@ import net.minecraft.text.Text;
 
 /** Waypoint queue, flight settings and safety settings on one scrolling page. */
 public class FlightScreen extends BilalScreen {
+    private static final String[] ROUTINE_NAMES = {"Off", "Assisted", "Full auto"};
     private static final String[] HUD_NAMES = {"off", "top center", "top left", "top right"};
     private static String draftX = "";
     private static String draftZ = "";
@@ -150,19 +151,26 @@ public class FlightScreen extends BilalScreen {
         toggle(left, y, inner, "Record flights", () -> FlightConfig.recordFlights, v -> FlightConfig.recordFlights = v,
                 FlightConfig::save, "Writes a log to .minecraft/bilal_flight_logs and, after an elytra is found, records how you walk, hit the frame and take off (teach mode). Send the files to improve the mod");
         y += 24;
-        cycle(left, y, inner, "Ship routine", 2, () -> FlightConfig.shipRoutineMode,
-                v -> FlightConfig.shipRoutineMode = v, v -> v == 0 ? "Off" : "Assisted",
-                FlightConfig::save, "Assisted mode asks for a fresh Ship step key press for each action. You still walk to each marked position; the mod selects the pickaxe, mines the recorded purpur blocks, takes the frame elytra and aims the pearl. Full automatic movement is not included yet.");
-        y += 24;
-        toggle(left, y, inner, "Ship routine: dry run", () -> FlightConfig.shipRoutineDryRun,
-                v -> FlightConfig.shipRoutineDryRun = v, FlightConfig::save,
-                "Preview only. Pressing Ship step prints the planned steps; it will not select items, mine blocks, hit the frame or throw a pearl.");
-        y += 24;
         button("Reset results", left, y, inner, () -> {
             for (FlightConfig.Waypoint w : FlightConfig.waypoints) w.result = "";
             FlightConfig.save();
             clearAndInit();
         }, "Clears the elytra / empty marks so every point is flown again");
+
+        // ---- ship routine ----
+        y += 34;
+        section("Ship routine (land - take elytra - leave - fly)", y);
+        y += 14;
+        cycle(left, y, inner, "Mode", 3, () -> FlightConfig.routineMode, v -> FlightConfig.routineMode = v,
+                v -> ROUTINE_NAMES[v], FlightConfig::save,
+                "Off = you do the ship by hand. Assisted = one key press per step. Full auto = all steps without key presses. Starts after ELYTRA FOUND");
+        y += 24;
+        toggle(left, y, inner, "Dry run (only check and print)", () -> FlightConfig.routineDryRun,
+                v -> FlightConfig.routineDryRun = v, FlightConfig::save,
+                "ON: the mod checks blocks, items and the pearl target and prints the plan, but does not move, mine, hit or throw anything. Turn it off for a real run");
+        y += 24;
+        label("Step key: " + FlightClient.stepKeyText() + "   (set it in Controls)", left, y + 6, 0xFFFFFFFF);
+        y += 12;
 
         // ---- safety ----
         y += 34;

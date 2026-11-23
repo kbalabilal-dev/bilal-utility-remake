@@ -41,11 +41,11 @@ public final class FlightConfig {
     public static boolean scout = true;       // search for frames while flying
     public static boolean useShulkers = true; // use the three shulkers to recognize untouched ships
     public static boolean recordFlights = false; // write a flight log + teach mode to .minecraft/bilal_flight_logs
-    public static int shipRoutineMode = 1; // 0 off, 1 assisted
-    public static boolean shipRoutineDryRun = false;
     public static boolean debugMode = false; // detailed Auto Elytra diagnostics in chat
     public static int searchRadius = 100;     // how far around a point it looks for the elytra item frame
     public static int landRadius = 40;        // landing this close to the point counts as "arrived"
+    public static int routineMode = 1;        // ship routine: 0 off, 1 assisted (one key press per step), 2 full auto
+    public static boolean routineDryRun = true; // only check and print what it would do
     public static int hudPos = 1;             // 0 off, 1 top centre, 2 top left, 3 top right
     public static int hudScale = 100;
 
@@ -54,9 +54,10 @@ public final class FlightConfig {
     private static class Data {
         List<Waypoint> waypoints = new ArrayList<>();
         int cruiseY = 180, pauseSeconds = 10, reserveRockets = 3, pearlBelowY = 20, teamhomeY = -30;
+        int routineMode = 1;
+        boolean routineDryRun = true;
         int hudPos = 1, hudScale = 100, searchRadius = 100, landRadius = 40;
-        boolean pearlRescue = true, teamhome = true, landWithChestplate = false, shipLandingChestplateDrop = true, hunt = true, scout = true, useShulkers = true, debugMode = false, recordFlights = false, shipRoutineDryRun = false;
-        int shipRoutineMode = 1;
+        boolean pearlRescue = true, teamhome = true, landWithChestplate = false, shipLandingChestplateDrop = true, hunt = true, scout = true, useShulkers = true, debugMode = false, recordFlights = false;
         String teamhomeCommand = "teamhome";
     }
 
@@ -101,11 +102,11 @@ public final class FlightConfig {
             scout = d.scout;
             useShulkers = d.useShulkers;
             recordFlights = d.recordFlights;
-            shipRoutineMode = clamp(d.shipRoutineMode, 0, 1);
-            shipRoutineDryRun = d.shipRoutineDryRun;
             debugMode = d.debugMode;
             searchRadius = d.searchRadius <= 0 ? 100 : clamp(d.searchRadius, 30, 200);
             landRadius = d.landRadius <= 0 ? 40 : clamp(d.landRadius, 10, 100);
+            routineMode = clamp(d.routineMode, 0, 2);
+            routineDryRun = d.routineDryRun;
             hudPos = clamp(d.hudPos, 0, 3);
             hudScale = d.hudScale <= 0 ? 100 : clamp(d.hudScale, 50, 200);
         } catch (Exception ignored) {
@@ -130,11 +131,11 @@ public final class FlightConfig {
         d.scout = scout;
         d.useShulkers = useShulkers;
         d.recordFlights = recordFlights;
-        d.shipRoutineMode = shipRoutineMode;
-        d.shipRoutineDryRun = shipRoutineDryRun;
         d.debugMode = debugMode;
         d.searchRadius = searchRadius;
         d.landRadius = landRadius;
+        d.routineMode = routineMode;
+        d.routineDryRun = routineDryRun;
         d.hudPos = hudPos;
         d.hudScale = hudScale;
         try {

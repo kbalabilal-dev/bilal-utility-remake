@@ -17,6 +17,12 @@ public class FlightClient implements ClientModInitializer {
     private static KeyBinding debugShulkersKey;
     private static KeyBinding shipStepKey;
 
+    /** Name of the key bound to "ship step", for the HUD and the settings screen. */
+    public static String stepKeyText() {
+        if (shipStepKey == null || shipStepKey.isUnbound()) return "not set - Controls > Bilal";
+        return shipStepKey.getBoundKeyLocalizedText().getString();
+    }
+
     @Override
     public void onInitializeClient() {
         FlightConfig.load();
@@ -26,6 +32,7 @@ public class FlightClient implements ClientModInitializer {
                 "key.bilalfly.settings", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
         debugShulkersKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.bilalfly.debug_shulkers", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
+
         shipStepKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.bilalfly.ship_step", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
 
@@ -35,7 +42,7 @@ public class FlightClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (toggleKey.wasPressed()) {
                 if (FlightShipRoutine.isActive()) {
-                    FlightShipRoutine.cancel(client);
+                    FlightShipRoutine.cancel(client, "Ship routine cancelled - press the flight key again to fly");
                 } else if (FlightRunner.isPausedAfterLandingFailure()) {
                     FlightRunner.resumeAfterLandingFailure(client);
                 } else if (FlightRunner.isRunning()) {
@@ -49,16 +56,16 @@ public class FlightClient implements ClientModInitializer {
                     client.setScreen(new FlightScreen(null));
                 }
             }
-            while (shipStepKey.wasPressed()) {
-                FlightShipRoutine.advance(client);
-            }
             while (debugShulkersKey.wasPressed()) {
                 if (client.world != null && client.player != null) {
                     FlightRunner.debugShulkers(client);
                 }
             }
-            FlightShipRoutine.tick(client);
+            while (shipStepKey.wasPressed()) {
+                FlightShipRoutine.onStepKey(client);
+            }
             FlightRunner.tick(client);
+            FlightShipRoutine.tick(client);
         });
     }
 }

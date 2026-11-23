@@ -11,8 +11,12 @@ public final class FlightHud {
 
     public static void render(DrawContext context, RenderTickCounter tickCounter) {
         FlightRunner.frameCheck(MinecraftClient.getInstance());
-        if (!FlightRunner.isRunning() && !FlightShipRoutine.isActive()) return;
-        ProgressBox.render(context, FlightRunner.hudLines(), FlightRunner.progress(), FlightConfig.hudPos,
-                FlightConfig.hudScale, 0, 0, 0x66CCFF);
+        if (FlightRunner.isRunning()) {
+            ProgressBox.render(context, FlightRunner.hudLines(), FlightRunner.progress(), FlightConfig.hudPos,
+                    FlightConfig.hudScale, 0, 0, 0x66CCFF);
+        } else if (FlightShipRoutine.isVisible()) {
+            ProgressBox.render(context, FlightShipRoutine.hudLines(), FlightShipRoutine.progress(), FlightConfig.hudPos,
+                    FlightConfig.hudScale, 0, 0, 0xFFAA33);
+        }
     }
 }

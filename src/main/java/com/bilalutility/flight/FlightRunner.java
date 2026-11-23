@@ -4,7 +4,6 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.entity.mob.ShulkerEntity;
 import net.minecraft.entity.player.PlayerInventory;
@@ -72,7 +71,6 @@ public final class FlightRunner {
     private static double shipRoofY = Double.NaN;
     private static double shipAnchorY = Double.NaN;   // Y of the frame / shulker that proved the ship
     private static long lastDebugHeartbeat;
-    private static long lastRoutineRescueMillis;
     private static boolean scoutDone, orbiting, spotSet;
     private static double spotX, spotZ, refY;
     private static double orbitDir = 1;
@@ -121,7 +119,6 @@ public final class FlightRunner {
     // ------------------------------------------------------------------ start / stop
 
     public static void start(MinecraftClient client) {
-        if (FlightShipRoutine.isActive()) return;
         if (state == State.PAUSED_FAILURE) {
             resumeAfterLandingFailure(client);
             return;
@@ -241,29 +238,8 @@ public final class FlightRunner {
         long now = System.currentTimeMillis();
         if (now - lastTeamhome < 250) return;
         lastTeamhome = now;
-        if (FlightShipRoutine.isActive()) FlightShipRoutine.cancel(client);
         client.player.networkHandler.sendChatCommand(FlightConfig.teamhomeCommand);
         if (state != State.IDLE) stop(client, "Under Y " + FlightConfig.teamhomeY + ": /" + FlightConfig.teamhomeCommand + " sent");
-    }
-
-    /** Keep the existing island-pearl rescue available while the normal flight runner is paused for ship looting. */
-    public static void routineVoidSafety(MinecraftClient client, boolean allowPearlRescue) {
-        if (!allowPearlRescue || !FlightShipRoutine.isActive() || state != State.IDLE
-                || !FlightConfig.pearlRescue || client == null || client.player == null || client.world == null) return;
-        ClientPlayerEntity p = client.player;
-        if (p.isOnGround() || p.isGliding() || p.hasStatusEffect(StatusEffects.LEVITATION)
-                || p.getY() >= FlightConfig.pearlBelowY) return;
-        long now = System.currentTimeMillis();
-        if (now - lastRoutineRescueMillis < 1000) return;
-        lastRoutineRescueMillis = now;
-        FlightShipRoutine.cancel(client); // emergency rescue takes priority over the assisted looting sequence
-        if (!islandKnown) scanIslands(client);
-        if (islandKnown) {
-            throwPearl(client);
-            FlightRecorder.event("SHIP_VOID_RESCUE pearl_to=" + islandX + "," + islandY + "," + islandZ);
-        } else {
-            msg(client, "Auto Elytra safety: no loaded island found for pearl rescue");
-        }
     }
 
     // ------------------------------------------------------------------ main tick
@@ -1168,9 +1144,6 @@ public final class FlightRunner {
             double ay = frameTarget != null ? frameTarget.getY() : client.player.getY();
             double az = frameTarget != null ? frameTarget.getZ() : client.player.getZ();
             FlightRecorder.startTeach(client, ax, ay, az);
-            if (FlightConfig.shipRoutineMode != 0 && FlightShipRoutine.start(client, ax, ay, az)) {
-                text = "ELYTRA FOUND at " + name + " - assisted ship routine ready; press the Ship step key";
-            }
         }
         stop(client, text);
         if (client.player != null) client.player.sendMessage(Text.literal(text), false);
@@ -1635,7 +1608,6 @@ public final class FlightRunner {
         List<String> lines = new ArrayList<>();
         MinecraftClient c = MinecraftClient.getInstance();
         lines.add("Auto Elytra: " + label());
-        if (FlightShipRoutine.isActive()) lines.addAll(FlightShipRoutine.hudLines());
         if (c.player == null) return lines;
         if (target != null) {
             lines.add(String.format(Locale.ROOT, "To %s  %d blocks", target.name, (int) distanceTo(c.player, target)));
