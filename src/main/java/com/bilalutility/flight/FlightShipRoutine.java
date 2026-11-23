@@ -133,6 +133,12 @@ public final class FlightShipRoutine {
     private static final long SCAN_SLICE_NANOS = 10_000_000L;
     // pearl scan statistics (for the log and the stop message)
     private static int scTried, scWall, scVoid, scRange, scHigh, scSpace, scPatch;
+    // Automatic emergency healing shared by the flight controller and ship routine.
+    private static final float AUTO_APPLE_HEALTH = 12.0f;
+    private static final int AUTO_APPLE_HOTBAR_SLOT = 8;
+    private static boolean appleBusy, appleStarted, appleMoved, appleWarned;
+    private static int appleSourceSlot = -1, appleOriginalSelected = -1, appleUseTicks, appleCooldown;
+    private static long appleLastWorldTime = Long.MIN_VALUE;
     private static double lastPx, lastPy, lastPz;
 
     private static final class PearlPlan {
@@ -600,6 +606,7 @@ public final class FlightShipRoutine {
     // ------------------------------------------------------------------ running a step
 
     private static void run(MinecraftClient c, ClientPlayerEntity p) {
+        if (tickAutoGoldenApple(c)) return;
         Step s = STEPS[stepIndex];
         if (c.currentScreen != null && s != Step.STORE_ELYTRA) {
             releaseKeys(c);
@@ -1825,6 +1832,111 @@ public final class FlightShipRoutine {
         BlockPos bp = blockAt(g);
         return "(a=" + fmt(g[0]) + ", left=" + fmt(g[1]) + ", h=" + fmt(g[2]) + ") = " + blockId(c, bp)
                 + " at " + bp.getX() + " " + bp.getY() + " " + bp.getZ();
+    }
+
+    // ------------------------------------------------------------------ automatic survival
+
+    /**
+     * Eats a golden apple at or below six hearts. Searches the entire player inventory,
+     * temporarily swaps an apple into hotbar slot 9 when needed, then restores the slot.
+     * Returns true while consuming so movement/mining does not fight the use action.
+     */
+    public static boolean tickAutoGoldenApple(MinecraftClient c) {
+        if (c == null || c.player == null || c.world == null || c.interactionManager == null) return false;
+        ClientPlayerEntity p = c.player;
+        long worldTime = c.world.getTime();
+        if (appleLastWorldTime == worldTime) return appleBusy;
+        appleLastWorldTime = worldTime;
+
+        if (appleCooldown > 0) appleCooldown--;
+        if (!appleBusy && p.getHealth() > AUTO_APPLE_HEALTH) {
+            appleWarned = false;
+            return false;
+        }
+        if (c.currentScreen != null) return appleBusy;
+
+        if (appleBusy) {
+            appleUseTicks++;
+            c.options.useKey.setPressed(true);
+            if (p.isUsingItem() && isGoldenApple(p.getActiveItem())) {
+                appleStarted = true;
+                return true;
+            }
+            if (appleStarted) {
+                finishAutoApple(c, p);
+                appleCooldown = 40;
+                return false;
+            }
+            if (appleUseTicks > 12) {
+                finishAutoApple(c, p);
+                return false;
+            }
+            return true;
+        }
+        if (p.getHealth() > AUTO_APPLE_HEALTH || appleCooldown > 0 || p.isUsingItem()) return false;
+
+        int appleSlot = goldenAppleHotbarSlot(p);
+        appleOriginalSelected = p.getInventory().getSelectedSlot();
+        appleMoved = false;
+        appleSourceSlot = -1;
+        if (appleSlot < 0) {
+            for (int i = 9; i < 36; i++) {
+                if (isGoldenApple(p.getInventory().getStack(i))) {
+                    appleSourceSlot = i;
+                    appleSlot = AUTO_APPLE_HOTBAR_SLOT;
+                    PlayerScreenHandler h = p.playerScreenHandler;
+                    c.interactionManager.clickSlot(h.syncId, appleSourceSlot, appleSlot, SlotActionType.SWAP, p);
+                    appleMoved = true;
+                    break;
+                }
+            }
+        }
+        if (appleSlot < 0) {
+            if (!appleWarned) {
+                say(c, "Auto-heal: health is low, but no golden apple is in your inventory");
+                FlightRecorder.routine("AUTO_APPLE_MISSING hp=" + fmt(p.getHealth()));
+                appleWarned = true;
+            }
+            return false;
+        }
+
+        p.getInventory().setSelectedSlot(appleSlot);
+        appleBusy = true;
+        appleStarted = false;
+        appleUseTicks = 0;
+        c.options.useKey.setPressed(true);
+        FlightRecorder.routine("AUTO_APPLE_START hp=" + fmt(p.getHealth()) + " slot=" + (appleSlot + 1)
+                + " movedFromInventory=" + appleMoved);
+        return true;
+    }
+
+    private static boolean isGoldenApple(ItemStack stack) {
+        return !stack.isEmpty() && (stack.isOf(Items.GOLDEN_APPLE) || stack.isOf(Items.ENCHANTED_GOLDEN_APPLE));
+    }
+
+    private static int goldenAppleHotbarSlot(ClientPlayerEntity p) {
+        for (int i = 0; i < 9; i++) {
+            if (isGoldenApple(p.getInventory().getStack(i))) return i;
+        }
+        return -1;
+    }
+
+    private static void finishAutoApple(MinecraftClient c, ClientPlayerEntity p) {
+        c.options.useKey.setPressed(false);
+        if (appleMoved && appleSourceSlot >= 9 && appleSourceSlot < 36) {
+            PlayerScreenHandler h = p.playerScreenHandler;
+            c.interactionManager.clickSlot(h.syncId, appleSourceSlot, AUTO_APPLE_HOTBAR_SLOT, SlotActionType.SWAP, p);
+        }
+        if (appleOriginalSelected >= 0 && appleOriginalSelected < 9) {
+            p.getInventory().setSelectedSlot(appleOriginalSelected);
+        }
+        FlightRecorder.routine("AUTO_APPLE_END hp=" + fmt(p.getHealth()) + " consumed=" + appleStarted);
+        appleBusy = false;
+        appleStarted = false;
+        appleMoved = false;
+        appleSourceSlot = -1;
+        appleOriginalSelected = -1;
+        appleUseTicks = 0;
     }
 
     // ------------------------------------------------------------------ small helpers

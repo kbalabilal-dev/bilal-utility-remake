@@ -490,6 +490,7 @@ public final class FlightRunner {
             return;
         }
         FlightRecorder.tick(client, state.name(), state == State.IDLE);
+        if (FlightShipRoutine.tickAutoGoldenApple(client)) return;
         if (state == State.IDLE) return;
         ClientPlayerEntity p = client.player;
         if (p == null || client.world == null || client.world.getRegistryKey() != startDimension) {
