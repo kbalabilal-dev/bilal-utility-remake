@@ -92,6 +92,11 @@ public final class FlightShipRoutine {
     private static int stepTicks, sub, subTick, waitLeft = -1, delayLeft, alertLeft, airTicks, levTicks, doneHold;
     private static int stuckTicks;
     private static double walkBest = 1e9;
+    // One temporary side-step waypoint is used to recover from ordinary walls without
+    // weakening the ground/drop safety check.
+    private static boolean walkDetourActive;
+    private static double walkDetourX, walkDetourZ;
+    private static int walkDetourAttempts;
     private static String abortReason = "", lastLine = "";
     private static RegistryKey<World> dimension;
     private static ItemFrameEntity frame;
@@ -469,6 +474,8 @@ public final class FlightShipRoutine {
         waitLeft = -1;
         walkBest = 1e9;
         stuckTicks = 0;
+        walkDetourActive = false;
+        walkDetourAttempts = 0;
         aimOk = 0;
     }
 
@@ -1453,12 +1460,23 @@ public final class FlightShipRoutine {
     }
 
     private static int walkTo(MinecraftClient c, ClientPlayerEntity p, double tx, double tz, double tol, boolean allowDrop) {
+        // If a previous tick selected a safe side-step, finish that short detour first.
+        if (walkDetourActive) {
+            if (Math.hypot(walkDetourX - p.getX(), walkDetourZ - p.getZ()) < 0.42) {
+                walkDetourActive = false;
+                walkBest = 1e9;
+                stuckTicks = 0;
+            } else {
+                tx = walkDetourX;
+                tz = walkDetourZ;
+            }
+        }
         double dx = tx - p.getX(), dz = tz - p.getZ();
         double dist = Math.hypot(dx, dz);
         if (dist < tol) {
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
-            return p.isOnGround() ? W_ARRIVED : W_MOVING;     // never "arrived" in the middle of a jump
+            return p.isOnGround() ? W_ARRIVED : W_MOVING;
         }
         if (!allowDrop && !pathSafe(c, p, tx, tz)) {
             c.options.forwardKey.setPressed(false);
@@ -1470,29 +1488,49 @@ public final class FlightShipRoutine {
         p.setYaw(p.getYaw() + clampF(MathHelper.wrapDegrees(wantYaw - p.getYaw()), -step, step));
         p.setPitch(p.getPitch() + clampF(18f - p.getPitch(), -4f, 4f));
         boolean aligned = Math.abs(MathHelper.wrapDegrees(wantYaw - p.getYaw())) < 18f;
-        boolean press = aligned && (dist > 0.7 || now % 3 == 0);       // short taps when close
+        boolean press = aligned && (dist > 0.7 || now % 3 == 0);
         boolean bodyBlocked = press && walkBodyAhead(c, p, dx / dist, dz / dist, 0.0);
-        boolean raisedFree = press && !walkBodyAhead(c, p, dx / dist, dz / dist, 1.0);
-        boolean realWall = press && walkWallAhead(c, p, dx / dist, dz / dist);
-        if (realWall) {
+        boolean raisedBlocked = press && walkBodyAhead(c, p, dx / dist, dz / dist, 1.0);
+        if (press && bodyBlocked && raisedBlocked) {
+            // Try a short left/right bypass. A candidate is accepted only if its ground
+            // path is safe; the original route's void/drop protection remains in force.
+            double sideX = -dz / dist, sideZ = dx / dist;
+            double[][] candidates = {{sideX, sideZ}, {-sideX, -sideZ}};
+            if (walkDetourAttempts < 2) for (double[] side : candidates) {
+                double candidateX = p.getX() + side[0] * 1.15;
+                double candidateZ = p.getZ() + side[1] * 1.15;
+                if (allowDrop || pathSafe(c, p, candidateX, candidateZ)) {
+                    if (!walkBodyAhead(c, p, side[0], side[1], 0.0)
+                            && !walkBodyAhead(c, p, side[0], side[1], 1.0)) {
+                        walkDetourX = candidateX;
+                        walkDetourZ = candidateZ;
+                        walkDetourActive = true;
+                        walkDetourAttempts++;
+                        c.options.forwardKey.setPressed(false);
+                        c.options.jumpKey.setPressed(false);
+                        FlightRecorder.routine("WALK_DETOUR pos=" + local(p.getX(), p.getY(), p.getZ())
+                                + " target=" + local(candidateX, p.getY(), candidateZ));
+                        return W_MOVING;
+                    }
+                }
+            }
             BlockPos ahead = walkBlockAhead(p, dx / dist, dz / dist);
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
             FlightRecorder.routine("WALK_BLOCKED pos=" + local(p.getX(), p.getY(), p.getZ())
-                    + " blockAhead=" + blockId(c, ahead) + " raisedFree=" + raisedFree);
+                    + " blockAhead=" + blockId(c, ahead) + " raisedFree=false detour=exhausted");
             return W_UNSAFE;
         }
         c.options.forwardKey.setPressed(press);
-        // A collision that disappears when the body is raised is a step, not a wall.
-        // Jump only from the ground; while airborne, keep moving without aborting.
-        c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.4 && bodyBlocked && raisedFree);
+        // A low obstacle that clears at raised height is a step. Jump only when grounded.
+        c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.4 && bodyBlocked && !raisedBlocked);
         if (dist < walkBest - 0.05) {
             walkBest = dist;
             stuckTicks = 0;
         } else {
             stuckTicks++;
         }
-        return stuckTicks > 45 ? W_STUCK : W_MOVING;
+        return stuckTicks > 65 ? W_STUCK : W_MOVING;
     }
 
     /** True when the unraised body hits something but the same body raised by one block is clear. */
