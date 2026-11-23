@@ -97,6 +97,7 @@ public final class FlightShipRoutine {
     private static boolean walkDetourActive;
     private static double walkDetourX, walkDetourZ;
     private static int walkDetourAttempts;
+    private static int exitNavRetries;
     private static String abortReason = "", lastLine = "";
     private static RegistryKey<World> dimension;
     private static ItemFrameEntity frame;
@@ -222,6 +223,7 @@ public final class FlightShipRoutine {
     private static void arm(MinecraftClient c) {
         phase = Phase.IDLE;
         stepIndex = 0;
+        exitNavRetries = 0;
         glideAsk = false;
         glideConfirmed = false;
         glideGround = null;
@@ -408,6 +410,7 @@ public final class FlightShipRoutine {
                 + " ticks=" + (now - stepStartNow) + " result=" + result + " " + detail);
         glideAsk = false;
         glideConfirmed = false;
+        if (s == Step.DIG_EXIT) exitNavRetries = 0;
         lastLine = "step " + (stepIndex + 1) + " " + s + " = " + result;
         stepIndex++;
         if (s == Step.STORE_ELYTRA && !FlightRunner.hasQueuePoint()) {
@@ -448,6 +451,24 @@ public final class FlightShipRoutine {
             phase = Phase.WAIT_KEY;
             say(c, "Step done. Press [" + FlightClient.stepKeyText() + "]: " + STEPS[stepIndex].text);
         }
+    }
+
+    private static boolean retryExitNavigation(MinecraftClient c, String reason) {
+        if (FlightConfig.routineMode != 2 || STEPS[Math.min(stepIndex, STEPS.length - 1)] != Step.DIG_EXIT) {
+            return false;
+        }
+        releaseKeys(c);
+        exitNavRetries++;
+        phase = Phase.DELAY;
+        // Keep retrying in full-auto; each retry widens the detour search.
+        delayLeft = Math.min(80, 12 + exitNavRetries * 4);
+        FlightRecorder.routine("EXIT_NAV_WATCHDOG retry=" + exitNavRetries
+                + " delay=" + delayLeft + " reason=" + reason.replace(' ', '_'));
+        if (c != null && c.player != null && exitNavRetries % 5 == 0) {
+            c.player.sendMessage(Text.literal("Ship routine: still finding a safe exit route (retry "
+                    + exitNavRetries + ")."), true);
+        }
+        return true;
     }
 
     private static void abort(MinecraftClient c, String reason) {
@@ -1061,8 +1082,11 @@ public final class FlightShipRoutine {
         switch (sub) {
             case 0 -> {
                 int r = walkTo(c, p, wx(SPOT_DIG[0], SPOT_DIG[1]), wz(SPOT_DIG[0], SPOT_DIG[1]), 0.3, false);
-                if (r == W_UNSAFE) abort(c, "unsafe path: a wall or a drop blocks the way");
-                else if (r == W_STUCK) abort(c, "stuck on the way to the tunnel");
+                if (r == W_UNSAFE) {
+                    if (!retryExitNavigation(c, "unsafe path: wall or drop")) abort(c, "unsafe path: a wall or a drop blocks the way");
+                } else if (r == W_STUCK) {
+                    if (!retryExitNavigation(c, "stuck on the way to the tunnel")) abort(c, "stuck on the way to the tunnel");
+                }
                 else if (r == W_ARRIVED) {
                     if (Math.abs(p.getY() - (fy + SPOT_DIG[2])) > 0.7) abort(c, "not at the tunnel spot (Y " + fmt(p.getY()) + ")");
                     else go(1);
@@ -1481,6 +1505,7 @@ public final class FlightShipRoutine {
         if (!allowDrop && !pathSafe(c, p, tx, tz)) {
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
+            if (tryWalkDetour(c, p, tx, tz)) return W_MOVING;
             return W_UNSAFE;
         }
         float wantYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
@@ -1491,39 +1516,27 @@ public final class FlightShipRoutine {
         boolean press = aligned && (dist > 0.7 || now % 3 == 0);
         boolean bodyBlocked = press && walkBodyAhead(c, p, dx / dist, dz / dist, 0.0);
         boolean raisedBlocked = press && walkBodyAhead(c, p, dx / dist, dz / dist, 1.0);
-        if (press && bodyBlocked && raisedBlocked) {
-            // Try a short left/right bypass. A candidate is accepted only if its ground
-            // path is safe; the original route's void/drop protection remains in force.
-            double sideX = -dz / dist, sideZ = dx / dist;
-            double[][] candidates = {{sideX, sideZ}, {-sideX, -sideZ}};
-            if (walkDetourAttempts < 2) for (double[] side : candidates) {
-                double candidateX = p.getX() + side[0] * 1.15;
-                double candidateZ = p.getZ() + side[1] * 1.15;
-                if (allowDrop || pathSafe(c, p, candidateX, candidateZ)) {
-                    if (!walkBodyAhead(c, p, side[0], side[1], 0.0)
-                            && !walkBodyAhead(c, p, side[0], side[1], 1.0)) {
-                        walkDetourX = candidateX;
-                        walkDetourZ = candidateZ;
-                        walkDetourActive = true;
-                        walkDetourAttempts++;
-                        c.options.forwardKey.setPressed(false);
-                        c.options.jumpKey.setPressed(false);
-                        FlightRecorder.routine("WALK_DETOUR pos=" + local(p.getX(), p.getY(), p.getZ())
-                                + " target=" + local(candidateX, p.getY(), candidateZ));
-                        return W_MOVING;
-                    }
-                }
-            }
-            BlockPos ahead = walkBlockAhead(p, dx / dist, dz / dist);
+        BlockPos ahead = walkBlockAhead(p, dx / dist, dz / dist);
+        String aheadId = blockId(c, ahead);
+        // Chests have a non-full collision shape. The ordinary +1.0 block-height
+        // probe can still overlap the chest/ceiling geometry and incorrectly classify
+        // it as an impassable wall. Treat a chest as a step and test actual headroom
+        // above its top before jumping onto it.
+        boolean chestStep = aheadId.contains("chest");
+        boolean chestJumpClear = chestStep && !walkBodyAhead(c, p, dx / dist, dz / dist, 1.25);
+        if (press && bodyBlocked && raisedBlocked && !chestJumpClear) {
+            if (tryWalkDetour(c, p, tx, tz)) return W_MOVING;
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
             FlightRecorder.routine("WALK_BLOCKED pos=" + local(p.getX(), p.getY(), p.getZ())
-                    + " blockAhead=" + blockId(c, ahead) + " raisedFree=false detour=exhausted");
+                    + " blockAhead=" + aheadId + " raisedFree=false detour=exhausted");
             return W_UNSAFE;
         }
         c.options.forwardKey.setPressed(press);
-        // A low obstacle that clears at raised height is a step. Jump only when grounded.
-        c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.4 && bodyBlocked && !raisedBlocked);
+        // Jump low collision-shape obstacles, including chests, instead of detouring
+        // around them. The player must be grounded and have headroom above the chest.
+        c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.4
+                && ((bodyBlocked && !raisedBlocked) || chestJumpClear));
         if (dist < walkBest - 0.05) {
             walkBest = dist;
             stuckTicks = 0;
@@ -1531,6 +1544,59 @@ public final class FlightShipRoutine {
             stuckTicks++;
         }
         return stuckTicks > 65 ? W_STUCK : W_MOVING;
+    }
+
+    /**
+     * Select a safe intermediate waypoint around an obstacle or a drop in the direct
+     * route. The route is re-evaluated after every waypoint, so several waypoints can
+     * be chained around larger ship structures.
+     */
+    private static boolean tryWalkDetour(MinecraftClient c, ClientPlayerEntity p, double tx, double tz) {
+        double dx = tx - p.getX(), dz = tz - p.getZ();
+        double dist = Math.hypot(dx, dz);
+        if (dist < 0.01 || walkDetourAttempts >= 24) return false;
+        double fx = dx / dist, fz = dz / dist;
+        double sx = -fz, sz = fx;
+        double scale = 1.0 + Math.min(exitNavRetries, 4) * 0.35;
+        double[][] offsets = {
+                {0.25, 1.10}, {0.25, -1.10},
+                {0.55, 1.55}, {0.55, -1.55},
+                {0.85, 2.05}, {0.85, -2.05},
+                {1.35, 1.45}, {1.35, -1.45},
+                {-0.35, 1.25}, {-0.35, -1.25},
+                {1.75, 2.25}, {1.75, -2.25},
+                {0.0, 2.60}, {0.0, -2.60},
+                {2.20, 1.15}, {2.20, -1.15},
+                {-0.75, 2.0}, {-0.75, -2.0},
+                {2.75, 2.0}, {2.75, -2.0},
+                {0.5, 3.0}, {0.5, -3.0},
+                {3.0, 0.0}, {-1.5, 0.0}
+        };
+        while (walkDetourAttempts < offsets.length) {
+            double[] o = offsets[walkDetourAttempts++];
+            double forward = o[0] * scale;
+            double side = o[1] * scale;
+            double vx = fx * forward + sx * side;
+            double vz = fz * forward + sz * side;
+            double len = Math.hypot(vx, vz);
+            if (len < 0.1) continue;
+            vx /= len;
+            vz /= len;
+            double candidateX = p.getX() + fx * forward + sx * side;
+            double candidateZ = p.getZ() + fz * forward + sz * side;
+            if (!pathSafe(c, p, candidateX, candidateZ)) continue;
+            if (walkBodyAhead(c, p, vx, vz, 0.0) || walkBodyAhead(c, p, vx, vz, 1.0)) continue;
+            walkDetourX = candidateX;
+            walkDetourZ = candidateZ;
+            walkDetourActive = true;
+            c.options.forwardKey.setPressed(false);
+            c.options.jumpKey.setPressed(false);
+            FlightRecorder.routine("WALK_DETOUR pos=" + local(p.getX(), p.getY(), p.getZ())
+                    + " waypoint=" + local(candidateX, p.getY(), candidateZ)
+                    + " attempt=" + walkDetourAttempts + " scale=" + fmt(scale));
+            return true;
+        }
+        return false;
     }
 
     /** True when the unraised body hits something but the same body raised by one block is clear. */
