@@ -35,7 +35,7 @@ import java.util.Locale;
 import java.util.Random;
 
 /**
- * Ship routine: after "ELYTRA FOUND" it does  land -> take elytra -> leave -> fly again.
+ * Ship routine: after "ELYTRA FOUND" it lands, takes the Elytra, stores extras, leaves and flies again.
  * All numbers come from the 3 recorded ships (log 20261122). Local coordinates:
  *   a    = forward, away from the ship wall (the frame's facing)
  *   left = to the left when you look along "a"
@@ -48,6 +48,7 @@ public final class FlightShipRoutine {
         DROP("Walk to the drop block and fall in", 900),
         DIG_UNDER_SHULKER("Break the block under the shulker", 500),
         TAKE_ELYTRA("Hit the frame and take the elytra", 700),
+        STORE_ELYTRA("Store extra Elytras in the Ender Chest", 700),
         DIG_EXIT("Dig the exit tunnel", 700),
         PEARL_OUT("Pearl to the ground", 900),
         TAKEOFF("Take off and fly again", 700);
@@ -107,6 +108,7 @@ public final class FlightShipRoutine {
     private static String mineFail = "";
     // step data
     private static int elytraBefore, hitTries, aimOk, pearlBefore;
+    private static int storageSourceSlot = -1, storageDestSlot = -1;
     private static long throwNow;
     private static PearlPlan plan;
     // shulker bullet defense
@@ -396,8 +398,8 @@ public final class FlightShipRoutine {
         glideConfirmed = false;
         lastLine = "step " + (stepIndex + 1) + " " + s + " = " + result;
         stepIndex++;
-        if (s == Step.TAKE_ELYTRA && !FlightRunner.hasQueuePoint()) {
-            // last ship of the queue: nowhere to fly to, so no tunnel, no pearl, no glide
+        if (s == Step.STORE_ELYTRA && !FlightRunner.hasQueuePoint()) {
+            // last ship of the queue: store the extra first, then stop without a tunnel or glide
             FlightRecorder.routine("ROUTINE_END result=queue_finished (last ship: no pearl, no glide)");
             stepIndex = STEPS.length;
             phase = Phase.DONE;
@@ -417,6 +419,14 @@ public final class FlightShipRoutine {
             alertLeft = 30;
             FlightRecorder.routine("ROUTINE_END result=ok");
             say(c, "Ship routine finished");
+            return;
+        }
+        if (s == Step.TAKE_ELYTRA) {
+            // Storage is automatic even in Assisted mode; the user should not need
+            // another key press between picking up the Elytra and protecting it.
+            phase = Phase.DELAY;
+            delayLeft = 5 + RND.nextInt(6);
+            say(c, "Elytra taken. Opening the Ender Chest...");
             return;
         }
         if (FlightConfig.routineMode == 2) {
@@ -469,7 +479,7 @@ public final class FlightShipRoutine {
     // ------------------------------------------------------------------ checks before a step
 
     private static String precheck(MinecraftClient c, ClientPlayerEntity p, Step s) {
-        if (frame == null || frame.isRemoved()) return "the item frame is gone";
+        if (s != Step.STORE_ELYTRA && (frame == null || frame.isRemoved())) return "the item frame is gone";
         switch (s) {
             case EQUIP_PICKAXE -> {
                 if (pickaxeSlot(p) < 0) return "no pickaxe in the hotbar";
@@ -498,6 +508,7 @@ public final class FlightShipRoutine {
             case TAKE_ELYTRA -> {
                 if (!frame.getHeldItemStack().isOf(Items.ELYTRA)) return "the frame has no elytra";
             }
+            case STORE_ELYTRA -> { }
             case DIG_EXIT -> {
                 for (double[] g : new double[][]{EXIT_UP, EXIT_LOW}) {
                     BlockState st = c.world.getBlockState(blockAt(g));
@@ -524,7 +535,7 @@ public final class FlightShipRoutine {
 
     private static String positionCheck(ClientPlayerEntity p, Step s) {
         float need = s == Step.DROP ? 10f : 8f;
-        if (p.getHealth() < need) return "health " + fmt(p.getHealth()) + " is below " + (int) need;
+        if (s != Step.STORE_ELYTRA && p.getHealth() < need) return "health " + fmt(p.getHealth()) + " is below " + (int) need;
         if (s == Step.DROP) {
             boolean inside = p.getY() < fy - 1.0;
             double hd = Math.hypot(p.getX() - fx, p.getZ() - fz);
@@ -549,6 +560,7 @@ public final class FlightShipRoutine {
                 info.add("would stand at a=" + fmt(SPOT_FRAME[0]) + " left=" + fmt(SPOT_FRAME[1]) + " and hit the frame (facing " + facingName + ")");
                 info.add("elytra in inventory now: " + elytraBefore);
             }
+            case STORE_ELYTRA -> info.add("would open /enderchest and store extra unenchanted Elytras; keep all enchanted Elytras and one plain backup");
             case DIG_EXIT -> {
                 info.add("would break " + blockText(c, EXIT_UP));
                 info.add("would break " + blockText(c, EXIT_LOW));
@@ -588,12 +600,12 @@ public final class FlightShipRoutine {
 
     private static void run(MinecraftClient c, ClientPlayerEntity p) {
         Step s = STEPS[stepIndex];
-        if (c.currentScreen != null) {
+        if (c.currentScreen != null && s != Step.STORE_ELYTRA) {
             releaseKeys(c);
             return;
         }
         boolean flightHandOver = s == Step.PEARL_OUT && sub >= 8;      // the flight owns the keys now
-        if (p.getHealth() < 8.0f && !flightHandOver) {
+        if (p.getHealth() < 8.0f && !flightHandOver && s != Step.STORE_ELYTRA) {
             abort(c, "health below 8 (" + fmt(p.getHealth()) + ")");
             return;
         }
@@ -633,6 +645,7 @@ public final class FlightShipRoutine {
             case DROP -> stepDrop(c, p);
             case DIG_UNDER_SHULKER -> stepUnder(c, p);
             case TAKE_ELYTRA -> stepTake(c, p);
+            case STORE_ELYTRA -> stepStoreElytra(c, p);
             case DIG_EXIT -> stepExit(c, p);
             case PEARL_OUT -> stepPearl(c, p);
             case TAKEOFF -> stepTakeoff(c, p);
@@ -674,7 +687,7 @@ public final class FlightShipRoutine {
                     return;
                 }
                 int r = walkTo(c, p, tx, tz, 0.15, false);
-                if (r == W_UNSAFE) abort(c, "unsafe: a drop of 4 blocks or more is ahead");
+                if (r == W_UNSAFE) abort(c, "unsafe path: a wall or a drop blocks the way");
                 else if (r == W_STUCK) abort(c, "stuck on the way to the drop block");
                 else if (r == W_ARRIVED) {
                     if (Math.abs(p.getY() - standY) > 0.7) {
@@ -767,7 +780,7 @@ public final class FlightShipRoutine {
         switch (sub) {
             case 0 -> {
                 int r = walkTo(c, p, wx(SPOT_FRAME[0], SPOT_FRAME[1]), wz(SPOT_FRAME[0], SPOT_FRAME[1]), 0.3, false);
-                if (r == W_UNSAFE) abort(c, "unsafe: a drop of 4 blocks or more is ahead");
+                if (r == W_UNSAFE) abort(c, "unsafe path: a wall or a drop blocks the way");
                 else if (r == W_STUCK) abort(c, "stuck on the way to the frame");
                 else if (r == W_ARRIVED) {
                     if (Math.abs(p.getY() - (fy + SPOT_FRAME[2])) > 0.7) abort(c, "not on the ledge in front of the frame");
@@ -809,7 +822,7 @@ public final class FlightShipRoutine {
             case 11 -> {
                 // Return to the normal frame-collection position; do not restart the ship routine.
                 int r = walkTo(c, p, wx(SPOT_FRAME[0], SPOT_FRAME[1]), wz(SPOT_FRAME[0], SPOT_FRAME[1]), 0.3, false);
-                if (r == W_UNSAFE) abort(c, "unsafe while returning to the item frame");
+                if (r == W_UNSAFE) abort(c, "unsafe wall or drop while returning to the item frame");
                 else if (r == W_STUCK) abort(c, "stuck while returning to the item frame after the shulker");
                 else if (r == W_ARRIVED) {
                     int pick = pickaxeSlot(p);
@@ -887,12 +900,135 @@ public final class FlightShipRoutine {
         }
     }
 
+    private static void stepStoreElytra(MinecraftClient c, ClientPlayerEntity p) {
+        if (sub == 0) {
+            storageSourceSlot = -1;
+            storageDestSlot = -1;
+            p.networkHandler.sendChatCommand("enderchest");
+            go(1);
+            FlightRecorder.routine("ENDER_CHEST_OPEN_REQUEST plainElytra=" + countPlainElytra(p));
+            return;
+        }
+
+        if (sub == 1) {
+            if (p.currentScreenHandler == p.playerScreenHandler) {
+                if (subTick > 100) {
+                    finishStep(c, "OK", "enderchest_unavailable; Elytras kept in inventory");
+                }
+                return;
+            }
+            net.minecraft.screen.ScreenHandler handler = p.currentScreenHandler;
+            int totalSlots = handler.getStacks().size();
+            int containerSlots = Math.max(0, totalSlots - 36);
+            storageSourceSlot = extraPlainElytraPlayerSlot(p);
+            if (storageSourceSlot < 0) {
+                p.closeHandledScreen();
+                finishStep(c, "OK", "no_extra_plain_elytra; enchanted Elytras and one backup kept");
+                return;
+            }
+            for (int i = 0; i < containerSlots; i++) {
+                if (handler.getSlot(i).getStack().isEmpty()) {
+                    storageDestSlot = i;
+                    break;
+                }
+            }
+            if (storageDestSlot < 0) {
+                p.closeHandledScreen();
+                finishStep(c, "OK", "enderchest_full; extra Elytra kept in inventory");
+                return;
+            }
+            int containerPlayerSlot = toContainerPlayerSlot(storageSourceSlot, containerSlots);
+            if (containerPlayerSlot < 0 || containerPlayerSlot >= totalSlots) {
+                p.closeHandledScreen();
+                finishStep(c, "OK", "could_not_map_inventory_slot; Elytra kept in inventory");
+                return;
+            }
+            c.interactionManager.clickSlot(handler.syncId, containerPlayerSlot, 0, SlotActionType.PICKUP, p);
+            c.interactionManager.clickSlot(handler.syncId, storageDestSlot, 0, SlotActionType.PICKUP, p);
+            go(2);
+            return;
+        }
+
+        if (sub == 2) {
+            net.minecraft.screen.ScreenHandler handler = p.currentScreenHandler;
+            if (handler == p.playerScreenHandler) {
+                finishStep(c, "OK", "enderchest_closed_after_transfer");
+                return;
+            }
+            if (handler.getCursorStack().isEmpty() && subTick >= 3) {
+                // Keep going until only the protected plain backup remains, or the chest is full.
+                int nextSource = extraPlainElytraPlayerSlot(p);
+                int totalSlots = handler.getStacks().size();
+                int containerSlots = Math.max(0, totalSlots - 36);
+                int nextDest = -1;
+                if (nextSource >= 0) {
+                    for (int i = 0; i < containerSlots; i++) {
+                        if (handler.getSlot(i).getStack().isEmpty()) {
+                            nextDest = i;
+                            break;
+                        }
+                    }
+                }
+                if (nextSource >= 0 && nextDest >= 0) {
+                    int nextContainerPlayerSlot = toContainerPlayerSlot(nextSource, containerSlots);
+                    if (nextContainerPlayerSlot >= 0 && nextContainerPlayerSlot < totalSlots) {
+                        storageSourceSlot = nextSource;
+                        storageDestSlot = nextDest;
+                        c.interactionManager.clickSlot(handler.syncId, nextContainerPlayerSlot, 0, SlotActionType.PICKUP, p);
+                        c.interactionManager.clickSlot(handler.syncId, nextDest, 0, SlotActionType.PICKUP, p);
+                        subTick = 0;
+                        return;
+                    }
+                }
+                p.closeHandledScreen();
+                FlightRecorder.routine("ENDER_CHEST_STORED through source=" + storageSourceSlot + " dest=" + storageDestSlot);
+                finishStep(c, "OK", nextSource >= 0 ? "enderchest_full; remaining_extras_kept_in_inventory"
+                        : "stored_extras; enchanted_elytras_and_one_plain_backup_kept");
+            } else if (!handler.getCursorStack().isEmpty() && subTick > 25) {
+                // Closing returns any cursor item to the player's inventory; never drop it.
+                p.closeHandledScreen();
+                finishStep(c, "OK", "transfer_not_confirmed; Elytra returned to inventory");
+            }
+        }
+    }
+
+    /** PlayerScreenHandler slot index of an extra plain Elytra; enchanted items are never candidates. */
+    private static int extraPlainElytraPlayerSlot(ClientPlayerEntity p) {
+        int plain = countPlainElytra(p);
+        if (plain <= 1) return -1; // keep one plain backup; all enchanted Elytras are protected
+        for (int inv = 0; inv < 36; inv++) {
+            ItemStack stack = p.getInventory().getStack(inv);
+            if (stack.isOf(Items.ELYTRA) && !stack.hasEnchantments()) {
+                return inv < 9 ? 36 + inv : inv;
+            }
+        }
+        return -1;
+    }
+
+    private static int countPlainElytra(ClientPlayerEntity p) {
+        int count = 0;
+        ItemStack worn = p.getEquippedStack(EquipmentSlot.CHEST);
+        if (worn.isOf(Items.ELYTRA) && !worn.hasEnchantments()) count++;
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = p.getInventory().getStack(i);
+            if (stack.isOf(Items.ELYTRA) && !stack.hasEnchantments()) count += stack.getCount();
+        }
+        return count;
+    }
+
+    /** Maps a PlayerScreenHandler slot (9..44) to the same inventory slot in a container handler. */
+    private static int toContainerPlayerSlot(int playerSlot, int containerSlots) {
+        if (playerSlot >= 9 && playerSlot <= 35) return containerSlots + playerSlot - 9;
+        if (playerSlot >= 36 && playerSlot <= 44) return containerSlots + 27 + playerSlot - 36;
+        return -1;
+    }
+
     private static void stepExit(MinecraftClient c, ClientPlayerEntity p) {
         BlockPos t1 = blockAt(EXIT_UP), t2 = blockAt(EXIT_LOW);
         switch (sub) {
             case 0 -> {
                 int r = walkTo(c, p, wx(SPOT_DIG[0], SPOT_DIG[1]), wz(SPOT_DIG[0], SPOT_DIG[1]), 0.3, false);
-                if (r == W_UNSAFE) abort(c, "unsafe: a drop of 4 blocks or more is ahead");
+                if (r == W_UNSAFE) abort(c, "unsafe path: a wall or a drop blocks the way");
                 else if (r == W_STUCK) abort(c, "stuck on the way to the tunnel");
                 else if (r == W_ARRIVED) {
                     if (Math.abs(p.getY() - (fy + SPOT_DIG[2])) > 0.7) abort(c, "not at the tunnel spot (Y " + fmt(p.getY()) + ")");
@@ -934,7 +1070,7 @@ public final class FlightShipRoutine {
         switch (sub) {
             case 0 -> {
                 int r = walkTo(c, p, wx(SPOT_PEARL[0], SPOT_PEARL[1]), wz(SPOT_PEARL[0], SPOT_PEARL[1]), 0.3, false);
-                if (r == W_UNSAFE) abort(c, "unsafe: a drop of 4 blocks or more is ahead");
+                if (r == W_UNSAFE) abort(c, "unsafe path: a wall or a drop blocks the way");
                 else if (r == W_STUCK) abort(c, "stuck on the way to the pearl spot");
                 else if (r == W_ARRIVED) {
                     if (Math.abs(p.getY() - (fy + SPOT_PEARL[2])) > 0.7) abort(c, "not at the pearl spot (Y " + fmt(p.getY()) + ")");
@@ -1049,7 +1185,7 @@ public final class FlightShipRoutine {
                         releaseKeys(c);
                         FlightRecorder.routine("GLIDE_EXIT_JUMPED pos=" + local(p.getX(), p.getY(), p.getZ()));
                         if (glideGround != null) FlightRunner.setFallbackIsland(glideGround[0], glideGround[1], glideGround[2]);
-                        FlightRunner.start(c);
+                        FlightRunner.startFromShipRoutine(c);
                         go(8);
                     }
                     return;
@@ -1099,7 +1235,7 @@ public final class FlightShipRoutine {
             }
             if (!p.isOnGround() || p.hasStatusEffect(StatusEffects.LEVITATION) || p.getVelocity().lengthSquared() > 0.01) return;
             if (!waited(10, 25)) return;
-            FlightRunner.start(c);
+            FlightRunner.startFromShipRoutine(c);
             go(1);
             return;
         }
@@ -1309,6 +1445,14 @@ public final class FlightShipRoutine {
         p.setPitch(p.getPitch() + clampF(18f - p.getPitch(), -4f, 4f));
         boolean aligned = Math.abs(MathHelper.wrapDegrees(wantYaw - p.getYaw())) < 18f;
         boolean press = aligned && (dist > 0.7 || now % 3 == 0);       // short taps when close
+        if (press && walkWallAhead(c, p, dx / dist, dz / dist)
+                && !(p.isOnGround() && stepAhead(c, p, dx / dist, dz / dist))) {
+            c.options.forwardKey.setPressed(false);
+            c.options.jumpKey.setPressed(false);
+            FlightRecorder.routine("WALK_BLOCKED_BY_WALL pos=" + local(p.getX(), p.getY(), p.getZ())
+                    + " target=" + fmt(tx) + "," + fmt(tz));
+            return W_UNSAFE;
+        }
         c.options.forwardKey.setPressed(press);
         c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.4 && stepAhead(c, p, dx / dist, dz / dist));
         if (dist < walkBest - 0.05) {
@@ -1318,6 +1462,16 @@ public final class FlightShipRoutine {
             stuckTicks++;
         }
         return stuckTicks > 45 ? W_STUCK : W_MOVING;
+    }
+
+    /** Checks the player's full body a short distance ahead so the routine never walks into a solid wall. */
+    private static boolean walkWallAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz) {
+        Box body = p.getBoundingBox();
+        for (double distance : new double[]{0.25, 0.50, 0.75}) {
+            Box future = body.offset(ux * distance, 0.0, uz * distance);
+            if (c.world.getBlockCollisions(p, future).iterator().hasNext()) return true;
+        }
+        return false;
     }
 
     /** Detects a one-block step across the player's width, with two blocks of headroom. */

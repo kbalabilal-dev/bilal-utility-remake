@@ -12,6 +12,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
@@ -101,9 +102,15 @@ public final class FlightRunner {
     private static boolean shipLanding;
     private static int verdictStreak, recoveryRockets;
     private static String lastVerdictSeen = "";
+    private static double lastVerdictCenterX = Double.NaN, lastVerdictCenterZ = Double.NaN;
     private static String lastScanNote = "";
 
     private static int alertLeft;
+
+    // Ender-chest capacity check before the queue starts. A second Start press confirms
+    // that the queue may continue even when the chest cannot hold every expected extra Elytra.
+    private static boolean storageCheckPending, storageConfirmationPending, internalStart;
+    private static int storageCheckTicks, storageExpectedSlots;
 
     // numbers for the HUD
     private static int foundThisRun, checkedThisRun;
@@ -112,10 +119,20 @@ public final class FlightRunner {
     private FlightRunner() {}
 
     public static boolean isRunning() {
-        return state != State.IDLE;
+        return state != State.IDLE || storageCheckPending;
+    }
+
+    public static boolean isStorageConfirmationPending() {
+        return storageConfirmationPending;
+    }
+
+    public static boolean isStorageCheckPending() {
+        return storageCheckPending;
     }
 
     public static String label() {
+        if (storageCheckPending) return "Checking Ender Chest";
+        if (storageConfirmationPending) return "Ender Chest low - press Start again";
         return switch (state) {
             case IDLE -> FlightConfig.waypoints.size() + " points";
             case PREPARE -> "Preparing";
@@ -130,22 +147,51 @@ public final class FlightRunner {
     // ------------------------------------------------------------------ start / stop
 
     public static void start(MinecraftClient client) {
-        boolean freshFallback = fallbackFresh;      // set by the ship routine just before a glide exit; used up by this call
+        boolean fromShipRoutine = internalStart;
+        internalStart = false;
+        boolean freshFallback = fallbackFresh;
         fallbackFresh = false;
         if (state == State.PAUSED_FAILURE) {
             resumeAfterLandingFailure(client);
             return;
         }
-        if (state != State.IDLE || client.player == null || client.world == null) return;
+        if (state != State.IDLE || storageCheckPending || client.player == null || client.world == null) return;
+        if (!buildRemainingQueue(client)) return;
+
+        if (!fromShipRoutine && !storageConfirmationPending && FlightConfig.routineMode != 0 && !FlightConfig.routineDryRun) {
+            String refusal = startRefusal(client, 0);
+            if (refusal != null) {
+                remaining.clear();
+                msg(client, "Auto Elytra: " + refusal);
+                return;
+            }
+            storageExpectedSlots = Math.max(0, countPlainElytra(client.player) + remaining.size() - 1);
+            storageCheckPending = true;
+            storageCheckTicks = 0;
+            client.player.networkHandler.sendChatCommand("enderchest");
+            msg(client, "Auto Elytra: checking Ender Chest space before starting the queue...");
+            return;
+        }
+        if (storageConfirmationPending) {
+            storageConfirmationPending = false;
+            msg(client, "Auto Elytra: continuing as requested; extra Elytras will stay in your inventory if the Ender Chest fills");
+        }
+        beginRun(client, freshFallback);
+    }
+
+    /** Internal restart after the ship routine exits; capacity was already checked at queue start. */
+    public static void startFromShipRoutine(MinecraftClient client) {
+        internalStart = true;
+        start(client);
+    }
+
+    private static boolean buildRemainingQueue(MinecraftClient client) {
         if (FlightConfig.waypoints.isEmpty()) {
             msg(client, "Auto Elytra: add at least one point first");
-            return;
+            return false;
         }
         remaining.clear();
         for (FlightConfig.Waypoint w : FlightConfig.waypoints) {
-            // hunting remembers the result of every point, so finished points are not flown again
-            // "empty" was an old v1.7 result based only on an item frame.
-            // It is not trustworthy anymore, so allow those points to be retried.
             if (isOpenPoint(w)) {
                 if ("empty".equals(w.result)) w.result = "";
                 remaining.add(w);
@@ -153,26 +199,29 @@ public final class FlightRunner {
         }
         if (remaining.isEmpty()) {
             msg(client, "Auto Elytra: all points have results - use Reactivate on a looted point, or Reset results");
-            return;
+            return false;
         }
+        return true;
+    }
+
+    private static void beginRun(MinecraftClient client, boolean freshFallback) {
         startDimension = client.world.getRegistryKey();
         ticks = 0;
         lastDebugHeartbeat = 0;
-        lastRocket = -100;      // never leave these from the last flight (this was the "first rocket" bug)
+        lastRocket = -100;
         lastPearl = -100;
         rocketsUsed = 0;
         flown = 0;
         blocksPerRocket = START_BLOCKS_PER_ROCKET;
         emergency = false;
         islandKnown = false;
-        // standing on the ground: this very spot is the fallback island (a glide exit sets its own before it starts)
         if (client.player.isOnGround()) {
             fallbackKnown = true;
             fallbackX = (int) Math.floor(client.player.getX());
             fallbackZ = (int) Math.floor(client.player.getZ());
             fallbackY = (int) Math.floor(client.player.getY());
         } else if (!freshFallback) {
-            fallbackKnown = false;      // started in the air by hand: no old ground from an earlier flight
+            fallbackKnown = false;
         }
         foundThisRun = 0;
         checkedThisRun = 0;
@@ -190,6 +239,51 @@ public final class FlightRunner {
         FlightRecorder.begin(client);
         debug(client, "Run started. Queue points=" + remaining.size() + ", search radius=" + FlightConfig.searchRadius
                 + ", hunt=" + FlightConfig.hunt + ", shulkers=" + FlightConfig.useShulkers);
+    }
+
+    private static void tickStorageCheck(MinecraftClient client) {
+        if (client == null || client.player == null || client.world == null) {
+            storageCheckPending = false;
+            storageConfirmationPending = false;
+            return;
+        }
+        storageCheckTicks++;
+        ScreenHandler handler = client.player.currentScreenHandler;
+        if (handler != client.player.playerScreenHandler) {
+            int totalSlots = handler.getStacks().size();
+            int containerSlots = Math.max(0, totalSlots - 36);
+            int empty = 0;
+            for (int i = 0; i < containerSlots; i++) {
+                if (handler.getSlot(i).getStack().isEmpty()) empty++;
+            }
+            client.player.closeHandledScreen();
+            storageCheckPending = false;
+            if (empty >= storageExpectedSlots) {
+                msg(client, "Auto Elytra: Ender Chest has enough room (" + empty + " empty slots for " + storageExpectedSlots + " expected Elytras)");
+                beginRun(client, false);
+            } else {
+                storageConfirmationPending = true;
+                msg(client, "Auto Elytra: Ender Chest has " + empty + " empty slots but may need " + storageExpectedSlots
+                        + ". Press Start again to continue; extras stay in your inventory when it fills.");
+            }
+            return;
+        }
+        if (storageCheckTicks >= 100) {
+            storageCheckPending = false;
+            storageConfirmationPending = true;
+            msg(client, "Auto Elytra: could not open /enderchest to check space. Press Start again to continue; extra Elytras will stay in your inventory if needed.");
+        }
+    }
+
+    private static int countPlainElytra(ClientPlayerEntity player) {
+        int count = 0;
+        ItemStack worn = player.getEquippedStack(EquipmentSlot.CHEST);
+        if (worn.isOf(Items.ELYTRA) && !worn.hasEnchantments()) count++;
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = player.getInventory().getStack(i);
+            if (stack.isOf(Items.ELYTRA) && !stack.hasEnchantments()) count += stack.getCount();
+        }
+        return count;
     }
 
     public static boolean isPausedAfterLandingFailure() { return state == State.PAUSED_FAILURE; }
@@ -321,6 +415,9 @@ public final class FlightRunner {
     }
 
     public static void stop(MinecraftClient client, String message) {
+        storageCheckPending = false;
+        storageConfirmationPending = false;
+        internalStart = false;
         state = State.IDLE;
         target = null;
         frameTarget = null;
@@ -354,6 +451,8 @@ public final class FlightRunner {
         shipLanding = false;
         verdictStreak = 0;
         lastVerdictSeen = "";
+        lastVerdictCenterX = Double.NaN;
+        lastVerdictCenterZ = Double.NaN;
         lastScanNote = "";
         recoveryRockets = 0;
         frameTarget = null;
@@ -385,6 +484,10 @@ public final class FlightRunner {
                 client.getSoundManager().play(PositionedSoundInstance.ui(SoundEvents.ENTITY_PLAYER_LEVELUP,
                         alertLeft % 20 == 0 ? 1.0f : 1.4f));
             }
+        }
+        if (storageCheckPending) {
+            tickStorageCheck(client);
+            return;
         }
         FlightRecorder.tick(client, state.name(), state == State.IDLE);
         if (state == State.IDLE) return;
@@ -553,6 +656,14 @@ public final class FlightRunner {
             return;
         }
         ClientPlayerEntity p = client.player;
+        if (takeoffStage == 0 && p.isOnGround() && takeoffPathBlocked(client, p, target)) {
+            client.options.jumpKey.setPressed(false);
+            client.options.forwardKey.setPressed(false);
+            state = State.PAUSED_FAILURE;
+            debug(client, "Takeoff blocked by nearby solid blocks; player is not moved into the wall.");
+            msg(client, "Auto Elytra: safe takeoff blocked by a nearby wall or ceiling. Move into open space, then press Start to retry.");
+            return;
+        }
         if (p.isGliding()) {
             client.options.jumpKey.setPressed(false);
             state = State.CRUISE;
@@ -587,6 +698,25 @@ public final class FlightRunner {
                 if (p.isOnGround() && takeoffTimer % 40 == 0) takeoffStage = 0;
             }
         }
+    }
+
+    /** Full-body clearance check before the first jump, especially when Start is pressed inside a ship. */
+    private static boolean takeoffPathBlocked(MinecraftClient client, ClientPlayerEntity player, FlightConfig.Waypoint destination) {
+        if (destination == null) return false;
+        double dx = destination.x + 0.5 - player.getX();
+        double dz = destination.z + 0.5 - player.getZ();
+        double distance = Math.hypot(dx, dz);
+        if (distance < 0.01) return false;
+        double ux = dx / distance;
+        double uz = dz / distance;
+        Box body = player.getBoundingBox();
+        for (double forward = 0.45; forward <= 1.80; forward += 0.45) {
+            for (double rise : new double[]{0.0, 0.6, 1.2}) {
+                Box future = body.offset(ux * forward, rise, uz * forward);
+                if (client.world.getBlockCollisions(player, future).iterator().hasNext()) return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------ flying and landing
@@ -699,27 +829,41 @@ public final class FlightRunner {
                             ShulkerScan scan = scanShulkers(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
                             rememberScan(scan);
                             lastFrameCount = countFrames(client, target.x + 0.5, target.z + 0.5, FlightConfig.searchRadius);
-                            verdictStreak = scan.verdict.equals(lastVerdictSeen) ? verdictStreak + 1 : 1;
+                            boolean sameVerdict = scan.verdict.equals(lastVerdictSeen);
+                            boolean stableShipCentre = scan.verdict.equals("looted") && sameVerdict
+                                    && !Double.isNaN(lastVerdictCenterX)
+                                    && Math.hypot(scan.centerX - lastVerdictCenterX, scan.centerZ - lastVerdictCenterZ) <= 3.0;
+                            if (scan.verdict.equals("looted")) {
+                                verdictStreak = stableShipCentre ? verdictStreak + 1 : 1;
+                                lastVerdictCenterX = scan.centerX;
+                                lastVerdictCenterZ = scan.centerZ;
+                            } else {
+                                verdictStreak = sameVerdict ? verdictStreak + 1 : 1;
+                                lastVerdictCenterX = Double.NaN;
+                                lastVerdictCenterZ = Double.NaN;
+                            }
                             lastVerdictSeen = scan.verdict;
                             double shipDist = Math.hypot(scan.centerX - p.getX(), scan.centerZ - p.getZ());
                             debug(client, "Air scan: shulkers=" + scan.shulkers.size() + ", verdict=" + scan.verdict
                                     + " x" + verdictStreak + ", " + lastScanNote + ", frames=" + lastFrameCount
                                     + ", shipDist=" + fmt(shipDist));
-                            // the same answer 8 scans in a row (about 2 s) before it is trusted
-                            if (verdictStreak >= 8) {
-                                if (scan.verdict.equals("untouched")) {
-                                    setShipLanding(client, scan.centerX, scan.centerY, scan.centerZ, "third shulker in place");
-                                } else if (scan.verdict.equals("looted") && shipDist <= 120) {
-                                    // the ship must really belong to THIS point (the point itself can be off by a few dozen blocks)
-                                    double fromPoint = Math.hypot(scan.centerX - (target.x + 0.5), scan.centerZ - (target.z + 0.5));
-                                    if (fromPoint <= LOOTED_MAX_FROM_POINT) {
-                                        skipPoint(client, "looted", "looks looted (" + lastScanNote + ")");
-                                        return;
-                                    }
-                                    if (ticks % 40 == 0) {
-                                        debug(client, "Looted verdict ignored: ship centre is " + fmt(fromPoint)
-                                                + " blocks from the point (limit " + (int) LOOTED_MAX_FROM_POINT + ")");
-                                    }
+                            // Positive untouched evidence still uses the existing quick confirmation.
+                            // A looted verdict is much riskier: wait 24 stable scans (about 6 seconds),
+                            // with the player close to the ship and its chunk fully loaded, to avoid
+                            // mistaking delayed entity updates / ping for a missing third shulker.
+                            if (scan.verdict.equals("untouched") && verdictStreak >= 8) {
+                                setShipLanding(client, scan.centerX, scan.centerY, scan.centerZ, "third shulker in place");
+                            } else if (scan.verdict.equals("looted") && verdictStreak >= 24
+                                    && scan.shulkers.size() >= 2 && shipDist <= 64
+                                    && chunkLoaded(client, scan.centerX, scan.centerZ)) {
+                                double fromPoint = Math.hypot(scan.centerX - (target.x + 0.5), scan.centerZ - (target.z + 0.5));
+                                if (fromPoint <= LOOTED_MAX_FROM_POINT) {
+                                    skipPoint(client, "looted", "confirmed looted after stable close-range checks (" + lastScanNote + ")");
+                                    return;
+                                }
+                                if (ticks % 40 == 0) {
+                                    debug(client, "Looted verdict ignored: ship centre is " + fmt(fromPoint)
+                                            + " blocks from the point (limit " + (int) LOOTED_MAX_FROM_POINT + ")");
                                 }
                             }
                         }
@@ -1121,13 +1265,22 @@ public final class FlightRunner {
     }
 
     private static void pauseUnsafeShipTouchdown(MinecraftClient client, String reason) {
-        state = State.PAUSED_FAILURE;
         if (client != null && client.options != null) {
             client.options.jumpKey.setPressed(false);
             client.options.forwardKey.setPressed(false);
         }
-        debug(client, "Ship landing stopped without retry: " + reason);
-        msg(client, "Auto Elytra: " + reason + " - paused safely; no retry rockets");
+        // Keep the proven landing target and approach logic unchanged. Only retry after
+        // a failed touchdown; do not alter a successful landing or its point selection.
+        landingAttempts++;
+        if (landingAttempts < 3 && target != null) {
+            debug(client, "Ship touchdown attempt " + landingAttempts + "/3 failed: " + reason + ". Taking off for another approach.");
+            msg(client, "Auto Elytra: " + reason + " - safe retry " + (landingAttempts + 1) + "/3");
+            beginTakeoff();
+            return;
+        }
+        state = State.PAUSED_FAILURE;
+        debug(client, "Ship landing paused after 3 failed touchdowns: " + reason);
+        msg(client, "Auto Elytra: " + reason + " - paused safely after 3 attempts; press Start to retry");
     }
 
     private static void arrived(MinecraftClient client, double dist) {
@@ -1230,9 +1383,11 @@ public final class FlightRunner {
                         pauseUnsafeShipTouchdown(client, "possible ship found but touchdown is not on its deck");
                         return;
                     }
-                    msg(client, "Auto Elytra: " + target.name + " looks looted (shulkers missing or moved), skipped");
-                    debug(client, "Destination marked looted. It stays in the queue; use Reactivate to try again.");
-                    markPoint("looted");
+                    // A single close-range scan at touchdown is not enough to mark a point
+                    // looted: the third shulker can be missing from the client briefly under lag.
+                    // Leave the result blank so this point can be checked again on a later run.
+                    msg(client, "Auto Elytra: " + target.name + " may be looted, but the server view is not confirmed; leaving it open to retry");
+                    debug(client, "Possible looted touchdown was not saved as a result; point remains retryable.");
                     remaining.remove(target);
                     enterPause(client);
                     return;

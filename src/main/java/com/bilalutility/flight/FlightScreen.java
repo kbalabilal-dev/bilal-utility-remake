@@ -18,7 +18,10 @@ public class FlightScreen extends BilalScreen {
     }
 
     private static String startLabel() {
-        return FlightRunner.isPausedAfterLandingFailure() ? "Resume flight" : (FlightRunner.isRunning() ? "Stop flight" : "Start flight");
+        if (FlightRunner.isPausedAfterLandingFailure()) return "Resume flight";
+        if (FlightRunner.isStorageCheckPending()) return "Checking Ender Chest...";
+        if (FlightRunner.isStorageConfirmationPending()) return "Start anyway (Ender Chest low)";
+        return FlightRunner.isRunning() ? "Stop flight" : "Start flight";
     }
 
     @Override
@@ -40,7 +43,7 @@ public class FlightScreen extends BilalScreen {
                 client.setScreen(null);
                 FlightRunner.start(client);
             }
-        }, "Needs an elytra, firework rockets and an ender pearl in your hotbar");
+        }, "Checks Ender Chest space first. If it is short, press Start again to continue safely.");
         startBtn.active = client != null && client.world != null;
 
         // ---- add a point ----
