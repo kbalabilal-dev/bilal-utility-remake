@@ -7,6 +7,7 @@ import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.entity.mob.ShulkerEntity;
 import net.minecraft.entity.projectile.ShulkerBulletEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -93,6 +94,9 @@ public final class FlightShipRoutine {
     private static String abortReason = "", lastLine = "";
     private static RegistryKey<World> dimension;
     private static ItemFrameEntity frame;
+    // A shulker is handled only when it is inside the ship, close to the frame, and can see the player.
+    private static ShulkerEntity frameThreat;
+    private static int frameThreatAttackCd;
     private static double fx, fy, fz;
     private static int fdx, fdz, ldx, ldz;
     private static String facingName = "";
@@ -213,6 +217,8 @@ public final class FlightShipRoutine {
         facingName = "";
         dimension = c.world.getRegistryKey();
         frame = null;
+        frameThreat = null;
+        frameThreatAttackCd = 0;
         double best = 9.0;
         Box box = new Box(pendX - 3, pendY - 3, pendZ - 3, pendX + 3, pendY + 3, pendZ + 3);
         for (ItemFrameEntity fr : c.world.getEntitiesByClass(ItemFrameEntity.class, box, e -> !e.isRemoved())) {
@@ -476,8 +482,14 @@ public final class FlightShipRoutine {
                 if (p.getY() < fy - 1.0) return null;          // already inside the ship (retry): nothing to check
                 BlockPos d = blockAt(DROP_BLOCK);
                 BlockState st = c.world.getBlockState(d);
-                if (st.isAir()) return "the drop block is already air at " + blockLocal(d);
-                if (!isPurpur(st)) return "unexpected block " + blockId(c, d) + " at the drop block " + blockLocal(d);
+                if (st.isAir()) {
+                    double fall = plannedFall(c, d);
+                    double near = Math.hypot(p.getX() - (d.getX() + 0.5), p.getZ() - (d.getZ() + 0.5));
+                    if (near > 1.25 || Double.isNaN(fall) || fall < 3.9 || fall > 6.3)
+                        return "the drop block is already air, but the hole is not safely reachable";
+                } else if (!isPurpur(st)) {
+                    return "unexpected block " + blockId(c, d) + " at the drop block " + blockLocal(d);
+                }
             }
             case DIG_UNDER_SHULKER -> {
                 BlockState st = c.world.getBlockState(blockAt(UNDER_BLOCK));
@@ -652,6 +664,15 @@ public final class FlightShipRoutine {
                     finishStep(c, "OK", "already_inside_the_ship");
                     return;
                 }
+                if (c.world.getBlockState(d).isAir()) {
+                    double near = Math.hypot(p.getX() - tx, p.getZ() - tz);
+                    if (near <= 1.25 && Math.abs(p.getY() - standY) <= 0.8) {
+                        go(3); // the hole was opened manually; use the same verified fall path
+                        return;
+                    }
+                    abort(c, "the drop hole is already open, but you are not safely beside it");
+                    return;
+                }
                 int r = walkTo(c, p, tx, tz, 0.15, false);
                 if (r == W_UNSAFE) abort(c, "unsafe: a drop of 4 blocks or more is ahead");
                 else if (r == W_STUCK) abort(c, "stuck on the way to the drop block");
@@ -721,6 +742,28 @@ public final class FlightShipRoutine {
             else abort(c, "the item frame is gone");
             return;
         }
+
+        // Do not attack every nearby shulker. Only intervene when it is inside the ship,
+        // close to the frame, and has line of sight to the player.
+        if (sub < 10) {
+            ShulkerEntity threat = findFrameThreat(c, p);
+            if (threat != null) {
+                int weapon = swordSlot(p);
+                if (weapon < 0) weapon = pickaxeSlot(p);
+                if (weapon < 0) {
+                    abort(c, "a shulker is blocking the frame, but no sword or pickaxe is in the hotbar");
+                    return;
+                }
+                frameThreat = threat;
+                p.getInventory().setSelectedSlot(weapon);
+                frameThreatAttackCd = 0;
+                FlightRecorder.routine("FRAME_SHULKER_BLOCKER pos=" + local(threat.getX(), threat.getY(), threat.getZ())
+                        + " weapon=" + Registries.ITEM.getId(p.getInventory().getStack(weapon).getItem()));
+                go(10);
+                return;
+            }
+        }
+
         switch (sub) {
             case 0 -> {
                 int r = walkTo(c, p, wx(SPOT_FRAME[0], SPOT_FRAME[1]), wz(SPOT_FRAME[0], SPOT_FRAME[1]), 0.3, false);
@@ -750,7 +793,7 @@ public final class FlightShipRoutine {
                     abort(c, "cannot aim at the frame");
                 }
             }
-            default -> {
+            case 2 -> {
                 int cnt = countElytra(p);
                 if (cnt > elytraBefore) {
                     finishStep(c, "OK", "elytra=" + elytraBefore + "->" + cnt + " after_hit_ticks=" + subTick
@@ -762,6 +805,85 @@ public final class FlightShipRoutine {
                     else abort(c, frame.getHeldItemStack().isOf(Items.ELYTRA) ? "the frame still has the elytra" : "the elytra was not picked up");
                 }
             }
+            case 10 -> handleFrameShulker(c, p);
+            case 11 -> {
+                // Return to the normal frame-collection position; do not restart the ship routine.
+                int r = walkTo(c, p, wx(SPOT_FRAME[0], SPOT_FRAME[1]), wz(SPOT_FRAME[0], SPOT_FRAME[1]), 0.3, false);
+                if (r == W_UNSAFE) abort(c, "unsafe while returning to the item frame");
+                else if (r == W_STUCK) abort(c, "stuck while returning to the item frame after the shulker");
+                else if (r == W_ARRIVED) {
+                    int pick = pickaxeSlot(p);
+                    if (pick >= 0) p.getInventory().setSelectedSlot(pick);
+                    if (Math.abs(p.getY() - (fy + SPOT_FRAME[2])) > 0.7) abort(c, "returned near the frame but not to its safe ledge");
+                    else {
+                        FlightRecorder.routine("FRAME_SHULKER_CLEARED return=" + local(p.getX(), p.getY(), p.getZ()));
+                        go(1);
+                    }
+                }
+            }
+            default -> { }
+        }
+    }
+
+    private static ShulkerEntity findFrameThreat(MinecraftClient c, ClientPlayerEntity p) {
+        Box area = new Box(fx - 5.0, fy - 4.0, fz - 5.0, fx + 5.0, fy + 3.0, fz + 5.0);
+        ShulkerEntity best = null;
+        double bestDist = 2.4 * 2.4;
+        for (ShulkerEntity shulker : c.world.getEntitiesByClass(ShulkerEntity.class, area,
+                e -> !e.isRemoved() && e.isAlive())) {
+            double a = localA(shulker.getX(), shulker.getZ());
+            double left = localLeft(shulker.getX(), shulker.getZ());
+            double h = shulker.getY() - fy;
+            // The ship interior is on the positive-a side of the frame. This rejects
+            // shulkers that teleport outside/behind the ship near the frame.
+            if (a < 0.8 || a > 4.8 || Math.abs(left) > 2.6 || h < -3.6 || h > 1.8) continue;
+            double fd = shulker.squaredDistanceTo(fx, fy, fz);
+            if (fd > bestDist || !shulker.canSee(p)) continue;
+            if (shulker.squaredDistanceTo(p) > 3.4 * 3.4) continue;
+            best = shulker;
+            bestDist = fd;
+        }
+        return best;
+    }
+
+    private static void handleFrameShulker(MinecraftClient c, ClientPlayerEntity p) {
+        if (frameThreat == null || frameThreat.isRemoved() || !frameThreat.isAlive()) {
+            frameThreat = null;
+            p.getInventory().setSelectedSlot(Math.max(0, pickaxeSlot(p)));
+            go(11);
+            return;
+        }
+        double a = localA(frameThreat.getX(), frameThreat.getZ());
+        double left = localLeft(frameThreat.getX(), frameThreat.getZ());
+        double h = frameThreat.getY() - fy;
+        // Never chase a shulker that teleported outside the ship or lost sight of the player.
+        if (a < 0.8 || a > 4.8 || Math.abs(left) > 2.6 || h < -3.6 || h > 1.8 || !frameThreat.canSee(p)) {
+            FlightRecorder.routine("FRAME_SHULKER_IGNORE moved_or_not_visible pos="
+                    + local(frameThreat.getX(), frameThreat.getY(), frameThreat.getZ()));
+            frameThreat = null;
+            int pick = pickaxeSlot(p);
+            if (pick >= 0) p.getInventory().setSelectedSlot(pick);
+            go(11);
+            return;
+        }
+        if (!isSword(p.getMainHandStack()) && !isPickaxe(p.getMainHandStack())) {
+            int weapon = swordSlot(p);
+            if (weapon < 0) weapon = pickaxeSlot(p);
+            if (weapon >= 0) p.getInventory().setSelectedSlot(weapon);
+        }
+        Vec3d target = new Vec3d(frameThreat.getX(), frameThreat.getY() + 0.5, frameThreat.getZ());
+        double err = look(p, target);
+        boolean on = c.crosshairTarget instanceof EntityHitResult eh && eh.getEntity() == frameThreat;
+        double dist = Math.sqrt(frameThreat.squaredDistanceTo(p));
+        if (frameThreatAttackCd > 0) frameThreatAttackCd--;
+        if (dist <= 3.4 && err < 4.0 && on && frameThreatAttackCd == 0) {
+            c.interactionManager.attackEntity(p, frameThreat);
+            p.swingHand(Hand.MAIN_HAND);
+            frameThreatAttackCd = 10 + RND.nextInt(5);
+            FlightRecorder.routine("FRAME_SHULKER_HIT dist=" + fmt(dist));
+        }
+        if (subTick > 120) {
+            abort(c, "the shulker is still blocking the item frame; stopping safely");
         }
     }
 
@@ -1198,11 +1320,20 @@ public final class FlightShipRoutine {
         return stuckTicks > 45 ? W_STUCK : W_MOVING;
     }
 
-    /** A one block step up in front of us, with room above it. */
+    /** Detects a one-block step across the player's width, with two blocks of headroom. */
     private static boolean stepAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz) {
-        int bx = MathHelper.floor(p.getX() + ux * 0.7), bz = MathHelper.floor(p.getZ() + uz * 0.7);
         int by = MathHelper.floor(p.getY() + 0.05);
-        return solid(c, bx, by, bz) && !solid(c, bx, by + 1, bz) && !solid(c, bx, by + 2, bz);
+        double px = -uz, pz = ux;
+        // Check the centre and both sides of the player's collision width. The old
+        // single-point check could miss a step when the centre ray passed its edge.
+        for (double side : new double[]{0.0, -0.25, 0.25}) {
+            int bx = MathHelper.floor(p.getX() + ux * 0.65 + px * side);
+            int bz = MathHelper.floor(p.getZ() + uz * 0.65 + pz * side);
+            if (solid(c, bx, by, bz) && !solid(c, bx, by + 1, bz) && !solid(c, bx, by + 2, bz)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Looks up to 6 blocks ahead; every single step down must be smaller than 4 blocks and ground must exist. */
@@ -1545,6 +1676,21 @@ public final class FlightShipRoutine {
 
     private static boolean isPickaxe(ItemStack st) {
         return !st.isEmpty() && Registries.ITEM.getId(st.getItem()).getPath().endsWith("_pickaxe");
+    }
+
+    private static boolean isSword(ItemStack st) {
+        return !st.isEmpty() && Registries.ITEM.getId(st.getItem()).getPath().endsWith("_sword");
+    }
+
+    private static int swordSlot(ClientPlayerEntity p) {
+        int any = -1;
+        for (int i = 0; i < 9; i++) {
+            ItemStack st = p.getInventory().getStack(i);
+            if (!isSword(st)) continue;
+            if (Registries.ITEM.getId(st.getItem()).getPath().equals("netherite_sword")) return i;
+            if (any < 0) any = i;
+        }
+        return any;
     }
 
     private static int pickaxeSlot(ClientPlayerEntity p) {
