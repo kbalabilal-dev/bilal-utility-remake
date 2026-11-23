@@ -4,6 +4,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.sound.PositionedSoundInstance;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.projectile.ShulkerBulletEntity;
@@ -11,6 +12,8 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.RegistryKey;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
@@ -93,8 +96,8 @@ public final class FlightShipRoutine {
     private static double fx, fy, fz;
     private static int fdx, fdz, ldx, ldz;
     private static String facingName = "";
-    private static boolean pendingFrame;
     private static double pendX, pendY, pendZ;
+    private static int elytraAtArm;
     // mining
     private static int mineTicks, aimIdx, aimMiss;
     private static String mineFail = "";
@@ -106,6 +109,23 @@ public final class FlightShipRoutine {
     private static ShulkerBulletEntity bullet;
     private static int bulletCd, defendTicks, bulletsStopped;
     private static boolean bulletLogged;
+    private static long bulletHitNow;
+    // glide exit (used when no pearl ground exists)
+    private static boolean glideAsk, glideConfirmed;
+    private static int glideAir;
+    private static double[] glideGround;          // ground the flight falls back on if something goes wrong (x, y, z)
+    private static final int GLIDE_EXTRA_ROCKETS = 1;   // margin: the player moves a little before the flight checks its rockets
+    // time-sliced pearl scan (about 10 ms per tick instead of one long freeze)
+    private static boolean scanActive;
+    private static int scG, scSgnIdx, scPitchIdx, scSlices;
+    private static long scNanos;
+    private static PearlPlan scBest;
+    private static Vec3d scStart;
+    private static float scBaseYaw;
+    private static final int PITCH_COUNT = 19;          // pitch -8 ... 64 in steps of 4
+    private static final long SCAN_SLICE_NANOS = 10_000_000L;
+    // pearl scan statistics (for the log and the stop message)
+    private static int scTried, scWall, scVoid, scRange, scHigh, scSpace, scPatch;
     private static double lastPx, lastPy, lastPz;
 
     private static final class PearlPlan {
@@ -148,7 +168,14 @@ public final class FlightShipRoutine {
         Step s = STEPS[Math.min(stepIndex, STEPS.length - 1)];
         l.add("Step " + (stepIndex + 1) + "/" + STEPS.length + ": " + s.text);
         switch (phase) {
-            case WAIT_KEY -> l.add("Press [" + FlightClient.stepKeyText() + "] to do this step");
+            case WAIT_KEY -> {
+                if (glideAsk) {
+                    l.add("No safe pearl ground here.");
+                    l.add("Press [" + FlightClient.stepKeyText() + "] to GLIDE out (dangerous), or sneak to stop");
+                } else {
+                    l.add("Press [" + FlightClient.stepKeyText() + "] to do this step");
+                }
+            }
             case DELAY -> l.add("Next step starts in a moment...");
             case RUN -> l.add("Working... " + (stepTicks / 20) + " s   (sneak = stop)");
             case ABORTED -> {
@@ -164,25 +191,23 @@ public final class FlightShipRoutine {
 
     // ------------------------------------------------------------------ arming (called from FlightRecorder)
 
-    public static void noteFrame(double x, double y, double z) {
-        pendingFrame = true;
+    /** Called by FlightRunner.found() when an elytra frame is confirmed and the flight has stopped. */
+    public static void onShipFound(MinecraftClient c, double x, double y, double z) {
         pendX = x;
         pendY = y;
         pendZ = z;
-    }
-
-    public static void onRunnerStopped(String message) {
-        boolean found = pendingFrame && message != null && message.startsWith("ELYTRA FOUND");
-        pendingFrame = false;
-        if (!found || FlightConfig.routineMode == 0) return;
-        MinecraftClient c = MinecraftClient.getInstance();
-        if (c.player == null || c.world == null) return;
+        if (FlightConfig.routineMode == 0) return;
+        if (c == null || c.player == null || c.world == null) return;
         arm(c);
     }
 
     private static void arm(MinecraftClient c) {
         phase = Phase.IDLE;
         stepIndex = 0;
+        glideAsk = false;
+        glideConfirmed = false;
+        glideGround = null;
+        scanActive = false;
         lastLine = "";
         abortReason = "";
         facingName = "";
@@ -215,10 +240,20 @@ public final class FlightShipRoutine {
         fz = frame.getZ();
         facingName = dir.toString();
         ClientPlayerEntity p = c.player;
+        elytraAtArm = countElytra(p);
         double hd = Math.hypot(p.getX() - fx, p.getZ() - fz);
+        boolean lastShip = !FlightRunner.hasQueuePoint();
         FlightRecorder.routine("ROUTINE_START mode=" + FlightConfig.routineMode + " dry=" + FlightConfig.routineDryRun
                 + " frame=" + fmt(fx) + "," + fmt(fy) + "," + fmt(fz) + " facing=" + facingName
-                + " player=" + local(p.getX(), p.getY(), p.getZ()));
+                + " player=" + local(p.getX(), p.getY(), p.getZ()) + " elytra=" + elytraAtArm
+                + " rockets=" + FlightRunner.rocketCount(p) + " lastShip=" + lastShip);
+        if (!FlightRecorder.isOpen()) {
+            p.sendMessage(Text.literal("Ship routine WARNING: no log file is open (it could not be created). "
+                    + "Nothing of this routine will be recorded."), false);
+        }
+        if (lastShip) {
+            p.sendMessage(Text.literal("Ship routine: this was the LAST point of the queue - the routine stops after you have the elytra."), false);
+        }
         if (p.getY() < fy + 3.0 || p.getY() > fy + 9.0 || hd > 16.0) {
             abort(c, "you are not on the ship roof (your Y " + fmt(p.getY()) + ", frame Y " + fmt(fy) + ")");
             return;
@@ -281,7 +316,9 @@ public final class FlightShipRoutine {
             abort(c, "stopped by you (sneak)");
             return;
         }
-        boolean takeoffRunning = phase == Phase.RUN && STEPS[stepIndex] == Step.TAKEOFF;
+        // the flight is ours in two places: the TAKEOFF step, and the last sub-step of a glide exit (PEARL_OUT sub 8)
+        Step cur = STEPS[Math.min(stepIndex, STEPS.length - 1)];
+        boolean takeoffRunning = phase == Phase.RUN && (cur == Step.TAKEOFF || (cur == Step.PEARL_OUT && sub >= 8));
         if (FlightRunner.isRunning() && !takeoffRunning) {
             cancel(c, "Ship routine cancelled: a flight was started");
             return;
@@ -298,6 +335,10 @@ public final class FlightShipRoutine {
     private static void beginStep(MinecraftClient c, String trigger) {
         ClientPlayerEntity p = c.player;
         Step s = STEPS[stepIndex];
+        if (glideAsk) {
+            glideConfirmed = true;
+            glideAsk = false;
+        }
         stepStartNow = now;
         stepStartClock = FlightRecorder.clock();
         stepTicks = 0;
@@ -310,11 +351,18 @@ public final class FlightShipRoutine {
         bulletCd = 0;
         defendTicks = 0;
         mineReset();
+        scanActive = false;
         go(0);
         releaseKeys(c);
         FlightRecorder.routine("STEP_BEGIN step=" + s + " t=" + stepStartClock + " trigger=" + trigger
                 + " dry=" + FlightConfig.routineDryRun + " pos=" + local(p.getX(), p.getY(), p.getZ())
                 + " hp=" + fmt(p.getHealth()));
+        // retry after a timeout: the elytra may already be in the inventory (the frame is empty or gone)
+        if (s == Step.TAKE_ELYTRA && countElytra(p) > elytraAtArm
+                && (frame == null || frame.isRemoved() || !frame.getHeldItemStack().isOf(Items.ELYTRA))) {
+            finishStep(c, "OK", "already_taken elytra=" + elytraAtArm + "->" + countElytra(p));
+            return;
+        }
         String why = precheck(c, p, s);
         if (why != null) {
             abort(c, why);
@@ -338,8 +386,25 @@ public final class FlightShipRoutine {
         releaseKeys(c);
         FlightRecorder.routine("STEP_END step=" + s + " start=" + stepStartClock + " end=" + FlightRecorder.clock()
                 + " ticks=" + (now - stepStartNow) + " result=" + result + " " + detail);
+        glideAsk = false;
+        glideConfirmed = false;
         lastLine = "step " + (stepIndex + 1) + " " + s + " = " + result;
         stepIndex++;
+        if (s == Step.TAKE_ELYTRA && !FlightRunner.hasQueuePoint()) {
+            // last ship of the queue: nowhere to fly to, so no tunnel, no pearl, no glide
+            FlightRecorder.routine("ROUTINE_END result=queue_finished (last ship: no pearl, no glide)");
+            stepIndex = STEPS.length;
+            phase = Phase.DONE;
+            doneHold = 200;
+            alertLeft = 30;
+            lastLine = "queue finished - you have the elytra";
+            say(c, "Ship routine finished: queue finished");
+            if (c.player != null) {
+                c.player.sendMessage(Text.literal("Ship routine: queue finished - there is no point left to fly to. "
+                        + "You have the elytra; the routine did not pearl or glide."), false);
+            }
+            return;
+        }
         if (stepIndex >= STEPS.length) {
             phase = Phase.DONE;
             doneHold = 200;
@@ -360,6 +425,9 @@ public final class FlightShipRoutine {
     private static void abort(MinecraftClient c, String reason) {
         releaseKeys(c);
         abortReason = reason;
+        glideAsk = false;
+        glideConfirmed = false;          // a retry asks again (assisted) or decides again (full auto)
+        scanActive = false;
         Step s = STEPS[Math.min(stepIndex, STEPS.length - 1)];
         ClientPlayerEntity p = c == null ? null : c.player;
         FlightRecorder.routine("STEP_END step=" + s + " start=" + stepStartClock + " end=" + FlightRecorder.clock()
@@ -405,6 +473,7 @@ public final class FlightShipRoutine {
                 }
             }
             case DROP -> {
+                if (p.getY() < fy - 1.0) return null;          // already inside the ship (retry): nothing to check
                 BlockPos d = blockAt(DROP_BLOCK);
                 BlockState st = c.world.getBlockState(d);
                 if (st.isAir()) return "the drop block is already air at " + blockLocal(d);
@@ -426,9 +495,14 @@ public final class FlightShipRoutine {
             }
             case PEARL_OUT -> {
                 if (hotbarSlot(p, Items.ENDER_PEARL) < 0) return "no ender pearl in the hotbar";
+                // never leave the ship if the flight could not start afterwards
+                String refusal = FlightRunner.startRefusal(c, 0);
+                if (refusal != null) return "the flight could not start after leaving: " + refusal;
             }
             case TAKEOFF -> {
                 if (FlightRunner.isRunning()) return "a flight is already running";
+                String refusal = FlightRunner.startRefusal(c, 0);
+                if (refusal != null) return "the flight cannot start: " + refusal;
                 if (hotbarSlot(p, Items.FIREWORK_ROCKET) < 0) return "no firework rockets in the hotbar";
                 if (FlightConfig.pearlRescue && hotbarSlot(p, Items.ENDER_PEARL) < 0) return "no ender pearl in the hotbar (pearl rescue is on)";
             }
@@ -442,7 +516,9 @@ public final class FlightShipRoutine {
         if (s == Step.DROP) {
             boolean inside = p.getY() < fy - 1.0;
             double hd = Math.hypot(p.getX() - fx, p.getZ() - fz);
-            if (!inside && (p.getY() < fy + 3.0 || hd > 16.0)) return "you are not on the ship roof";
+            if (!inside && (p.getY() < fy + 1.5 || p.getY() > fy + 9.0 || hd > 16.0)) {
+                return "you are not on the ship roof or the drop ledge (Y " + fmt(p.getY()) + ", frame Y " + fmt(fy) + ")";
+            }
         }
         return null;
     }
@@ -467,11 +543,24 @@ public final class FlightShipRoutine {
                 info.add("tunnel floor " + blockText(c, EXIT_FLOOR));
             }
             case PEARL_OUT -> {
+                long t0 = System.nanoTime();
                 PearlPlan pl = scanPearl(c, theoryEye());
+                long ms = (System.nanoTime() - t0) / 1_000_000L;
+                FlightRecorder.routine("PEARL_SCAN ms=" + ms + " tried=" + scTried + " found=" + (pl != null) + " mode=dry_run_one_tick");
+                info.add("pearl scan cost " + ms + " ms in one tick (the real run spreads it over several ticks)");
                 if (pl == null) {
-                    abort(c, "no safe ground found for the pearl (about 40 to 70 blocks back-left and well below)");
-                    return;
-                }
+                    String sum = scanSummary();
+                    String why = glideChecks(c, p, true);
+                    if (!FlightConfig.routineGlideExit || why != null) {
+                        abort(c, "no safe ground for the pearl (" + sum + ")" + (why == null ? " and glide exit is switched off" : " and no glide exit: " + why));
+                        return;
+                    }
+                    info.add("no safe pearl ground (" + sum + "): would GLIDE out of the tunnel (elytra, then the normal flight)");
+                    if (glideGround != null) {
+                        info.add("fallback ground if the flight fails: x " + fmt(glideGround[0]) + " y " + fmt(glideGround[1]) + " z " + fmt(glideGround[2]));
+                    }
+                    pl = null;
+                } else
                 info.add("pearl: yaw " + fmt(pl.yaw) + " pitch " + fmt(pl.pitch) + " lands " + fmt(pl.dist) + " blocks away at Y " + fmt(pl.landY)
                         + " (" + local(pl.landX, pl.landY, pl.landZ) + ")");
             }
@@ -491,7 +580,8 @@ public final class FlightShipRoutine {
             releaseKeys(c);
             return;
         }
-        if (p.getHealth() < 8.0f) {
+        boolean flightHandOver = s == Step.PEARL_OUT && sub >= 8;      // the flight owns the keys now
+        if (p.getHealth() < 8.0f && !flightHandOver) {
             abort(c, "health below 8 (" + fmt(p.getHealth()) + ")");
             return;
         }
@@ -627,7 +717,8 @@ public final class FlightShipRoutine {
 
     private static void stepTake(MinecraftClient c, ClientPlayerEntity p) {
         if (frame.isRemoved()) {
-            abort(c, "the item frame is gone");
+            if (countElytra(p) > elytraAtArm) finishStep(c, "OK", "frame_gone_elytra=" + elytraAtArm + "->" + countElytra(p));
+            else abort(c, "the item frame is gone");
             return;
         }
         switch (sub) {
@@ -729,15 +820,53 @@ public final class FlightShipRoutine {
                 }
             }
             case 1 -> {
-                if (!waited(5, 12)) return;
-                String why = standCheck(c, p);
-                if (why != null) {
-                    abort(c, why);
+                if (glideConfirmed) {
+                    String gw = glideChecks(c, p, true);
+                    if (gw != null) {
+                        abort(c, gw);
+                        return;
+                    }
+                    FlightRecorder.routine("GLIDE_EXIT_START pos=" + local(p.getX(), p.getY(), p.getZ()) + " hp=" + fmt(p.getHealth())
+                            + " fallback=" + fmt(glideGround[0]) + "," + fmt(glideGround[1]) + "," + fmt(glideGround[2]));
+                    go(6);
                     return;
                 }
-                plan = scanPearl(c, new Vec3d(p.getX(), p.getEyeY() - 0.1, p.getZ()));
+                if (!scanActive) {
+                    if (!waited(5, 12)) return;
+                    String why = standCheck(c, p);
+                    if (why != null) {
+                        abort(c, why);
+                        return;
+                    }
+                    scanBegin(new Vec3d(p.getX(), p.getEyeY() - 0.1, p.getZ()));
+                }
+                if (!scanStep(c, SCAN_SLICE_NANOS)) return;          // not finished: continues next tick
+                plan = scBest;
+                FlightRecorder.routine("PEARL_SCAN ms=" + (scNanos / 1_000_000L) + " ticks=" + scSlices + " tried=" + scTried
+                        + " found=" + (plan != null));
                 if (plan == null) {
-                    abort(c, "no safe ground found for the pearl (about 40 to 70 blocks back-left and well below)");
+                    String sum = scanSummary();
+                    FlightRecorder.routine("PEARL_SCAN_FAILED " + sum.replace(' ', '_'));
+                    String gw = glideChecks(c, p, true);
+                    if (!FlightConfig.routineGlideExit) {
+                        abort(c, "no safe ground for the pearl (" + sum + ") and glide exit is switched off");
+                        return;
+                    }
+                    if (gw != null) {
+                        abort(c, "no safe ground for the pearl (" + sum + ") and no glide exit: " + gw);
+                        return;
+                    }
+                    if (FlightConfig.routineMode == 2) {
+                        glideConfirmed = true;
+                        p.sendMessage(Text.literal("Ship routine: no safe pearl ground (" + sum + ") - gliding out (full auto)"), false);
+                        go(6);
+                    } else {
+                        glideAsk = true;
+                        releaseKeys(c);
+                        phase = Phase.WAIT_KEY;
+                        alertLeft = 60;
+                        p.sendMessage(Text.literal("Ship routine: no safe pearl ground (" + sum + "). Press the step key to GLIDE out, or sneak to stop."), false);
+                    }
                     return;
                 }
                 FlightRecorder.routine("PEARL_PLAN yaw=" + fmt(plan.yaw) + " pitch=" + fmt(plan.pitch) + " dist=" + fmt(plan.dist)
@@ -780,6 +909,58 @@ public final class FlightShipRoutine {
                 if (now - throwNow == 15 && countItem(p, Items.ENDER_PEARL) >= pearlBefore) abort(c, "the pearl was not thrown");
                 else if (now - throwNow > 160) abort(c, "the pearl did not teleport you");
             }
+            case 6 -> {
+                // put the elytra on (the runner may have put a chestplate on after landing)
+                if (p.hasStatusEffect(StatusEffects.LEVITATION)) return;
+                if (p.getEquippedStack(EquipmentSlot.CHEST).isOf(Items.ELYTRA)) {
+                    if (waited(6, 14)) go(7);
+                } else {
+                    if (subTick % 10 == 1) swapElytraIntoChest(c);
+                    if (subTick > 80) abort(c, "could not put the elytra on");
+                }
+            }
+            case 7 -> {
+                // walk straight out of the tunnel (backwards, away from the wall) and fall
+                if (!p.isOnGround()) {
+                    c.options.forwardKey.setPressed(true);
+                    if (++glideAir >= 3) {
+                        releaseKeys(c);
+                        FlightRecorder.routine("GLIDE_EXIT_JUMPED pos=" + local(p.getX(), p.getY(), p.getZ()));
+                        if (glideGround != null) FlightRunner.setFallbackIsland(glideGround[0], glideGround[1], glideGround[2]);
+                        FlightRunner.start(c);
+                        go(8);
+                    }
+                    return;
+                }
+                glideAir = 0;
+                // last look before the point of no return (still standing on the tunnel floor): can the flight really start?
+                String gw = glideChecks(c, p, false);
+                if (gw != null) {
+                    abort(c, gw);
+                    return;
+                }
+                walkTo(c, p, wx(-4.0, SPOT_PEARL[1]), wz(-4.0, SPOT_PEARL[1]), 0.2, true);
+                if (subTick > 120) abort(c, "could not step out of the tunnel");
+            }
+            case 8 -> {
+                if (FlightRunner.isRunning()) {
+                    if (p.isGliding()) {
+                        FlightRecorder.routine("STEP_END step=PEARL_OUT start=" + stepStartClock + " end=" + FlightRecorder.clock()
+                                + " ticks=" + (now - stepStartNow) + " result=GLIDE pos=" + local(p.getX(), p.getY(), p.getZ()));
+                        stepIndex = STEPS.length - 1;          // the flight is running: the routine is finished
+                        finishStep(c, "OK", "glide_exit");
+                    } else if (subTick == 21 && !p.isOnGround()) {
+                        // last resort: the elytra did not open about 1 second after the jump
+                        FlightRecorder.routine("GLIDE_EXIT_NOT_OPEN pos=" + local(p.getX(), p.getY(), p.getZ())
+                                + " vy=" + fmt(p.getVelocity().y));
+                        alertLeft = 100;
+                        p.sendMessage(Text.literal("Ship routine WARNING: the elytra has not opened after 1 second - "
+                                + "you are falling! Press jump, or sneak to take control."), false);
+                    }
+                } else if (subTick > 2) {
+                    abort(c, "the flight did not start (read the message above) - you are in the air, take control!");
+                }
+            }
             default -> {
                 if (p.isOnGround() && !p.hasStatusEffect(StatusEffects.LEVITATION) && subTick > 10) {
                     finishStep(c, "OK", "landed=" + local(p.getX(), p.getY(), p.getZ()) + " absY=" + fmt(p.getY()) + " hp=" + fmt(p.getHealth()));
@@ -817,6 +998,15 @@ public final class FlightShipRoutine {
      */
     private static boolean defend(MinecraftClient c, ClientPlayerEntity p, boolean lev) {
         if (bulletCd > 0) bulletCd--;
+        if (bullet != null && bullet.isRemoved()) {
+            if (bulletHitNow > 0) {
+                bulletsStopped++;
+                FlightRecorder.routine("BULLET_DESTROYED after=" + (now - bulletHitNow) + " total=" + bulletsStopped);
+            }
+            bullet = null;
+            bulletHitNow = 0;
+            bulletLogged = false;
+        }
         if (bullet == null || bullet.isRemoved() || bullet.squaredDistanceTo(p) > 100.0) {
             bullet = null;
             bulletLogged = false;
@@ -863,11 +1053,7 @@ public final class FlightShipRoutine {
             p.swingHand(Hand.MAIN_HAND);
             bulletCd = 5;
             FlightRecorder.routine("BULLET_HIT dist=" + fmt(dist) + " held=" + Registries.ITEM.getId(p.getMainHandStack().getItem()));
-            if (bullet.isRemoved()) {
-                bulletsStopped++;
-                FlightRecorder.routine("BULLET_DESTROYED total=" + bulletsStopped);
-                bullet = null;
-            }
+            bulletHitNow = now;
         }
         return true;
     }
@@ -988,7 +1174,7 @@ public final class FlightShipRoutine {
         if (dist < tol) {
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
-            return W_ARRIVED;
+            return p.isOnGround() ? W_ARRIVED : W_MOVING;     // never "arrived" in the middle of a jump
         }
         if (!allowDrop && !pathSafe(c, p, tx, tz)) {
             c.options.forwardKey.setPressed(false);
@@ -1063,40 +1249,190 @@ public final class FlightShipRoutine {
         return new Vec3d(wx(SPOT_PEARL[0], SPOT_PEARL[1]), fy + SPOT_PEARL[2] + 1.62 - 0.1, wz(SPOT_PEARL[0], SPOT_PEARL[1]));
     }
 
-    /** Tries yaw/pitch combinations around "back-left 45 degrees" and simulates the real pearl flight over the loaded world. */
+    private static String scanSummary() {
+        return "tried " + scTried + " throws: wall " + scWall + ", void/unloaded " + scVoid + ", distance " + scRange
+                + ", height " + scHigh + ", no space " + scSpace + ", narrow ground " + scPatch;
+    }
+
+    /** One call = the whole scan in one go (dry run). The real run uses scanBegin + scanStep over several ticks. */
     private static PearlPlan scanPearl(MinecraftClient c, Vec3d start) {
+        scanBegin(start);
+        while (!scanStep(c, Long.MAX_VALUE)) {
+            // Long.MAX_VALUE never runs out: one pass finishes it
+        }
+        return scBest;
+    }
+
+    private static void scanBegin(Vec3d start) {
         double dx = -fdx + ldx, dz = -fdz + ldz;
-        float baseYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        float[] yawOffs = {0f, -3f, 3f, -6f, 6f, -10f, 10f};
-        PearlPlan best = null;
-        for (float yo : yawOffs) {
-            for (float pitch = 26f; pitch <= 62f; pitch += 2f) {
-                float yaw = baseYaw + yo;
-                Impact im = simulatePearl(c, start, yaw, pitch);
-                if (im == null) continue;
-                BlockPos hit = im.hit;
-                if (im.free.y < hit.getY() + 0.5) continue;                       // it hits a wall, not the top of a block
-                double landY = hit.getY() + 1.0;
-                if (landY > fy - 20.0 || landY < 10.0) continue;                  // must be far below the ship, not in the void zone
-                double hd = Math.hypot(im.free.x - start.x, im.free.z - start.z);
-                if (hd < 32.0 || hd > 78.0) continue;
-                if (solid(c, hit.getX(), hit.getY() + 1, hit.getZ()) || solid(c, hit.getX(), hit.getY() + 2, hit.getZ())) continue;
-                if (groundPatch(c, hit) < 15) continue;                            // a wide flat patch, not an edge or a pillar
-                double cost = Math.abs(pitch - 42f) * 0.6 + Math.abs(yo) * 0.8 + (hd < 40 ? (40 - hd) * 0.5 : hd > 70 ? (hd - 70) * 0.5 : 0);
-                if (best == null || cost < best.cost) {
-                    best = new PearlPlan();
-                    best.yaw = yaw;
-                    best.pitch = pitch;
-                    best.dist = hd;
-                    best.cost = cost;
-                    best.landX = im.free.x;
-                    best.landY = landY;
-                    best.landZ = im.free.z;
+        scBaseYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        scStart = start;
+        scTried = scWall = scVoid = scRange = scHigh = scSpace = scPatch = 0;
+        scBest = null;
+        scG = 0;
+        scSgnIdx = 0;
+        scPitchIdx = 0;
+        scNanos = 0;
+        scSlices = 0;
+        scanActive = true;
+    }
+
+    /**
+     * Simulates the real pearl flight for many directions (back-left first, then all around) and pitches.
+     * The ship's own blocks block the directions that are not open. Works for about budgetNanos, then returns false
+     * (call again next tick). Returns true when finished: the result is in scBest (null = nothing safe found).
+     */
+    private static boolean scanStep(MinecraftClient c, long budgetNanos) {
+        long t0 = System.nanoTime();
+        scSlices++;
+        while (scG <= 15) {
+            int nSgn = scG == 0 ? 1 : 2;
+            while (scSgnIdx < nSgn) {
+                float sgn = scG == 0 ? 1f : (scSgnIdx == 0 ? -1f : 1f);
+                while (scPitchIdx < PITCH_COUNT) {
+                    float pitch = -8f + scPitchIdx * 4f;
+                    scanOne(c, scG * 12f * sgn, pitch);
+                    scPitchIdx++;
+                    if (System.nanoTime() - t0 > budgetNanos) {
+                        scNanos += System.nanoTime() - t0;
+                        return false;
+                    }
+                }
+                scSgnIdx++;
+                scPitchIdx = 0;
+            }
+            if (scBest != null) break;          // the direction closest to back-left that works
+            scG++;
+            scSgnIdx = 0;
+            scPitchIdx = 0;
+        }
+        scNanos += System.nanoTime() - t0;
+        scanActive = false;
+        return true;
+    }
+
+    /** One simulated throw: rates it and keeps it when it is the cheapest safe one so far. */
+    private static void scanOne(MinecraftClient c, float yo, float pitch) {
+        float yaw = scBaseYaw + yo;
+        scTried++;
+        Impact im = simulatePearl(c, scStart, yaw, pitch);
+        if (im == null) {
+            scVoid++;
+            return;
+        }
+        BlockPos hit = im.hit;
+        if (im.free.y < hit.getY() + 0.5) {
+            scWall++;
+            return;
+        }
+        double landY = hit.getY() + 1.0;
+        if (landY > fy - 20.0 || landY < 10.0) {
+            scHigh++;
+            return;
+        }
+        double hd = Math.hypot(im.free.x - scStart.x, im.free.z - scStart.z);
+        if (hd < 32.0 || hd > 115.0) {
+            scRange++;
+            return;
+        }
+        if (solid(c, hit.getX(), hit.getY() + 1, hit.getZ()) || solid(c, hit.getX(), hit.getY() + 2, hit.getZ())) {
+            scSpace++;
+            return;
+        }
+        if (groundPatch(c, hit) < 15) {
+            scPatch++;
+            return;
+        }
+        double cost = Math.abs(yo) * 0.15 + Math.abs(pitch - 42f) * 0.25
+                + (hd < 40 ? (40 - hd) * 0.5 : hd > 80 ? (hd - 80) * 0.3 : 0);
+        if (scBest == null || cost < scBest.cost) {
+            PearlPlan pl = new PearlPlan();
+            pl.yaw = yaw;
+            pl.pitch = pitch;
+            pl.dist = hd;
+            pl.cost = cost;
+            pl.landX = im.free.x;
+            pl.landY = landY;
+            pl.landZ = im.free.z;
+            scBest = pl;
+        }
+    }
+
+    // ------------------------------------------------------------------ glide exit
+
+    /** The dangerous fallback: jump out of the tunnel with the elytra and let the normal flight take over. */
+    private static String glideChecks(MinecraftClient c, ClientPlayerEntity p, boolean refreshGround) {
+        if (!FlightConfig.routineGlideExit) return "glide exit is switched off in the settings";
+        if (p.getHealth() < 14f) return "health " + fmt(p.getHealth()) + " is too low for a glide exit (need 14)";
+        if (p.hasStatusEffect(StatusEffects.LEVITATION)) return "levitation is active";
+        if (countItem(p, Items.FIREWORK_ROCKET) < 6 || hotbarSlot(p, Items.FIREWORK_ROCKET) < 0) {
+            return "you need at least 6 firework rockets, with some in the hotbar";
+        }
+        if (hotbarSlot(p, Items.ENDER_PEARL) < 0) return "no ender pearl in the hotbar for the void rescue";
+        ItemStack worn = p.getEquippedStack(EquipmentSlot.CHEST);
+        if (!worn.isOf(Items.ELYTRA) && countElytra(p) == 0) return "no elytra to glide with";
+        if (worn.isOf(Items.ELYTRA) && worn.getMaxDamage() - worn.getDamage() < 40) return "the worn elytra is almost broken";
+        // the flight must really start: a point must be left and the rockets must be enough for the first leg
+        String refusal = FlightRunner.startRefusal(c, GLIDE_EXTRA_ROCKETS);
+        if (refusal != null) return "the flight would not start after the jump: " + refusal;
+        // and there must be known ground to fall back on if anything goes wrong in the air
+        if (refreshGround || glideGround == null) glideGround = findFallbackGround(c);
+        if (glideGround == null) return "no ground found in the loaded chunks to fall back on (come back when more chunks are loaded)";
+        return null;
+    }
+
+    /**
+     * Ground below the ship that the flight can land on in an emergency. Looks in rings around the tunnel exit,
+     * at least 30 blocks away, at least 20 blocks below the frame, and wants a flat patch with air above it.
+     * Returns {x, y, z} (y = top of the ground) or null.
+     */
+    private static double[] findFallbackGround(MinecraftClient c) {
+        double x0 = wx(SPOT_PEARL[0], SPOT_PEARL[1]), z0 = wz(SPOT_PEARL[0], SPOT_PEARL[1]);
+        int topStart = MathHelper.floor(fy) - 12;
+        int bottom = Math.max(c.world.getBottomY(), MathHelper.floor(fy) - 110);
+        for (int r = 30; r <= 110; r += 6) {
+            double[] best = null;
+            int bestPatch = 0;
+            for (int k = 0; k < 24; k++) {
+                double ang = Math.toRadians(k * 15.0);
+                int bx = MathHelper.floor(x0 + Math.cos(ang) * r), bz = MathHelper.floor(z0 + Math.sin(ang) * r);
+                int top = -1;
+                for (int y = topStart; y >= bottom; y--) {
+                    if (solid(c, bx, y, bz)) {
+                        top = y + 1;
+                        break;
+                    }
+                }
+                if (top < 10 || top > fy - 20.0) continue;
+                int patch = groundPatch(c, new BlockPos(bx, top - 1, bz));
+                if (patch < 15) continue;
+                if (best == null || patch > bestPatch) {
+                    best = new double[]{bx + 0.5, top, bz + 0.5};
+                    bestPatch = patch;
                 }
             }
-            if (best != null) break;       // the smallest yaw change that works
+            if (best != null) return best;
         }
-        return best;
+        return null;
+    }
+
+    /** Same clicks as the flight code uses: pick up the elytra, put it on the chest slot, give back what comes out. */
+    private static void swapElytraIntoChest(MinecraftClient c) {
+        ClientPlayerEntity p = c.player;
+        PlayerScreenHandler h = p.playerScreenHandler;
+        int src = -1;
+        for (int sl = 9; sl <= 44; sl++) {
+            if (h.getSlot(sl).getStack().isOf(Items.ELYTRA)) {
+                src = sl;
+                break;
+            }
+        }
+        if (src < 0) return;
+        c.interactionManager.clickSlot(h.syncId, src, 0, SlotActionType.PICKUP, p);
+        c.interactionManager.clickSlot(h.syncId, 6, 0, SlotActionType.PICKUP, p);      // 6 = chest armor slot
+        if (!h.getCursorStack().isEmpty()) {
+            c.interactionManager.clickSlot(h.syncId, src, 0, SlotActionType.PICKUP, p);
+        }
     }
 
     private static int groundPatch(MinecraftClient c, BlockPos hit) {
@@ -1119,10 +1455,10 @@ public final class FlightShipRoutine {
         double x = start.x, y = start.y, z = start.z;
         double lx = x, ly = y, lz = z;
         int lastCx = Integer.MIN_VALUE, lastCz = Integer.MIN_VALUE;
-        for (int tick = 0; tick < 300; tick++) {
+        for (int tick = 0; tick < 220; tick++) {
             double nx = x + vx, ny = y + vy, nz = z + vz;
-            for (int s = 1; s <= 12; s++) {
-                double px = x + (nx - x) * s / 12.0, py = y + (ny - y) * s / 12.0, pz = z + (nz - z) * s / 12.0;
+            for (int s = 1; s <= 8; s++) {
+                double px = x + (nx - x) * s / 8.0, py = y + (ny - y) * s / 8.0, pz = z + (nz - z) * s / 8.0;
                 int bx = MathHelper.floor(px), by = MathHelper.floor(py), bz = MathHelper.floor(pz);
                 int cx = bx >> 4, cz = bz >> 4;
                 if (cx != lastCx || cz != lastCz) {

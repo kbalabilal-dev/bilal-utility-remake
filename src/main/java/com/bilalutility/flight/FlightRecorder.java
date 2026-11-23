@@ -54,16 +54,33 @@ public final class FlightRecorder {
         // the ship routine starts the flight itself: keep teach mode running during our own take off
         if (teach && !FlightShipRoutine.isActive()) endTeach("flight restarted");
         if (!FlightConfig.recordFlights || out != null) return;
+        open("START");
+    }
+
+    /** Opens a new log file. Returns false when it could not be created. */
+    private static boolean open(String firstWord) {
         try {
             Path dir = FabricLoader.getInstance().getGameDir().resolve("bilal_flight_logs");
             Files.createDirectories(dir);
             String name = "flight-" + new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date()) + ".log";
             out = Files.newBufferedWriter(dir.resolve(name), StandardCharsets.UTF_8);
             ticks = 0;
-            line("START points=" + FlightConfig.waypoints.size() + " searchRadius=" + FlightConfig.searchRadius);
+            line(firstWord + " points=" + FlightConfig.waypoints.size() + " searchRadius=" + FlightConfig.searchRadius);
+            return true;
         } catch (IOException e) {
             out = null;
+            return false;
         }
+    }
+
+    /** True while a log file is open (the ship routine warns the player when it is not). */
+    public static boolean isOpen() {
+        return out != null;
+    }
+
+    /** The ship routine needs its log even when "Record flights" is off (v2.0.2). */
+    private static boolean wanted() {
+        return FlightConfig.recordFlights || FlightConfig.routineMode != 0;
     }
 
     /** Ticks since teach mode started (or since the log started). Used by the ship routine for step times. */
@@ -72,6 +89,8 @@ public final class FlightRecorder {
     }
 
     public static void routine(String text) {
+        // the log may have been closed after the teach mode ended: open a new one so no routine line is lost
+        if (out == null && FlightConfig.routineMode != 0 && FlightShipRoutine.isVisible()) open("START_ROUTINE");
         if (out != null) line("ROUTINE " + text);
     }
 
@@ -80,17 +99,16 @@ public final class FlightRecorder {
     }
 
     public static void onStop(String message) {
-        FlightShipRoutine.onRunnerStopped(message);   // arms the ship routine after "ELYTRA FOUND"
         if (out == null) return;
         line("STOP " + (message == null ? "" : message));
-        if (!teach) close();
+        // the log stays open while the ship routine still works (it closes in tick() when everything is idle)
+        if (!teach && !FlightShipRoutine.isVisible()) close();
     }
 
     /** Called from FlightRunner.found(): from now on record what the player does by hand. */
     public static void startTeach(MinecraftClient client, double frameX, double frameY, double frameZ) {
-        FlightShipRoutine.noteFrame(frameX, frameY, frameZ);
-        if (!FlightConfig.recordFlights || client.player == null || client.world == null) return;
-        if (out == null) begin(client);
+        if (!wanted() || client.player == null || client.world == null) return;
+        if (out == null) open("START_TEACH");
         if (out == null) return;
         teach = true;
         teachStart = ticks;
@@ -124,7 +142,7 @@ public final class FlightRecorder {
         if (!teach) return;
         teach = false;
         line("TEACH_END " + why);
-        if (!FlightRunner.isRunning()) close();
+        if (!FlightRunner.isRunning() && !FlightShipRoutine.isVisible()) close();
     }
 
     /** Called every client tick, also while the runner is idle (that is when teach mode records). */
@@ -132,6 +150,12 @@ public final class FlightRecorder {
         if (out == null) return;
         ClientPlayerEntity p = client.player;
         if (p == null || client.world == null) return;
+        // nothing runs any more (no flight, no teach mode, routine finished): close the file
+        if (idle && !teach && !FlightShipRoutine.isVisible()) {
+            line("LOG_CLOSED nothing is running");
+            close();
+            return;
+        }
         ticks++;
         if (teach) {
             teachTick(client, p);       // also while the ship routine takes off (the runner is not idle then)

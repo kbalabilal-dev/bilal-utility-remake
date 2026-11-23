@@ -45,6 +45,7 @@ public final class FlightConfig {
     public static int searchRadius = 100;     // how far around a point it looks for the elytra item frame
     public static int landRadius = 40;        // landing this close to the point counts as "arrived"
     public static int routineMode = 1;        // ship routine: 0 off, 1 assisted (one key press per step), 2 full auto
+    public static boolean routineGlideExit = true;   // no pearl ground: jump out of the tunnel with the elytra (dangerous)
     public static boolean routineDryRun = true; // only check and print what it would do
     public static int hudPos = 1;             // 0 off, 1 top centre, 2 top left, 3 top right
     public static int hudScale = 100;
@@ -55,6 +56,7 @@ public final class FlightConfig {
         List<Waypoint> waypoints = new ArrayList<>();
         int cruiseY = 180, pauseSeconds = 10, reserveRockets = 3, pearlBelowY = 20, teamhomeY = -30;
         int routineMode = 1;
+        boolean routineGlideExit = true;
         boolean routineDryRun = true;
         int hudPos = 1, hudScale = 100, searchRadius = 100, landRadius = 40;
         boolean pearlRescue = true, teamhome = true, landWithChestplate = false, shipLandingChestplateDrop = true, hunt = true, scout = true, useShulkers = true, debugMode = false, recordFlights = false;
@@ -107,6 +109,7 @@ public final class FlightConfig {
             landRadius = d.landRadius <= 0 ? 40 : clamp(d.landRadius, 10, 100);
             routineMode = clamp(d.routineMode, 0, 2);
             routineDryRun = d.routineDryRun;
+            routineGlideExit = d.routineGlideExit;
             hudPos = clamp(d.hudPos, 0, 3);
             hudScale = d.hudScale <= 0 ? 100 : clamp(d.hudScale, 50, 200);
         } catch (Exception ignored) {
@@ -136,6 +139,7 @@ public final class FlightConfig {
         d.landRadius = landRadius;
         d.routineMode = routineMode;
         d.routineDryRun = routineDryRun;
+        d.routineGlideExit = routineGlideExit;
         d.hudPos = hudPos;
         d.hudScale = hudScale;
         try {

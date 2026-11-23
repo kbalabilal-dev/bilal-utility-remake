@@ -56,6 +56,17 @@ public final class FlightRunner {
     // nearest solid ground found in loaded chunks (x, z, top y); kept as "last known island"
     private static boolean islandKnown;
     private static int islandX, islandZ, islandY;
+    // fallback ground that is known from the start (start position, or given by the ship routine for a glide exit)
+    private static boolean fallbackKnown, fallbackFresh;
+    private static int fallbackX, fallbackZ, fallbackY;
+    // ships we already looted (frame x, z): their moved shulkers must never look like a "looted" next point
+    private static final List<double[]> lootedShips = new ArrayList<>();
+    private static final double LOOTED_IGNORE_RADIUS = 40;
+    // A saved "looted" verdict is only accepted when the ship is this close to the point.
+    // Measured: the ship of P2 is 68 blocks from its point, so 40 would throw good verdicts away.
+    private static final double LOOTED_MAX_FROM_POINT = 80;
+    /** Same start value as start() uses; one place for the first-leg rocket formula. */
+    private static final double START_BLOCKS_PER_ROCKET = 90;
     private static float lastHealth;
 
     // first rocket check
@@ -119,6 +130,8 @@ public final class FlightRunner {
     // ------------------------------------------------------------------ start / stop
 
     public static void start(MinecraftClient client) {
+        boolean freshFallback = fallbackFresh;      // set by the ship routine just before a glide exit; used up by this call
+        fallbackFresh = false;
         if (state == State.PAUSED_FAILURE) {
             resumeAfterLandingFailure(client);
             return;
@@ -133,7 +146,7 @@ public final class FlightRunner {
             // hunting remembers the result of every point, so finished points are not flown again
             // "empty" was an old v1.7 result based only on an item frame.
             // It is not trustworthy anymore, so allow those points to be retried.
-            if (!FlightConfig.hunt || w.result == null || w.result.isEmpty() || w.result.equals("empty")) {
+            if (isOpenPoint(w)) {
                 if ("empty".equals(w.result)) w.result = "";
                 remaining.add(w);
             }
@@ -149,9 +162,18 @@ public final class FlightRunner {
         lastPearl = -100;
         rocketsUsed = 0;
         flown = 0;
-        blocksPerRocket = 90;
+        blocksPerRocket = START_BLOCKS_PER_ROCKET;
         emergency = false;
         islandKnown = false;
+        // standing on the ground: this very spot is the fallback island (a glide exit sets its own before it starts)
+        if (client.player.isOnGround()) {
+            fallbackKnown = true;
+            fallbackX = (int) Math.floor(client.player.getX());
+            fallbackZ = (int) Math.floor(client.player.getZ());
+            fallbackY = (int) Math.floor(client.player.getY());
+        } else if (!freshFallback) {
+            fallbackKnown = false;      // started in the air by hand: no old ground from an earlier flight
+        }
         foundThisRun = 0;
         checkedThisRun = 0;
         lastShulkerCount = 0;
@@ -171,6 +193,118 @@ public final class FlightRunner {
     }
 
     public static boolean isPausedAfterLandingFailure() { return state == State.PAUSED_FAILURE; }
+
+    // ------------------------------------------------------------------ helpers for the ship routine (one place for the rules)
+
+    /** A point that start() would still fly to. */
+    private static boolean isOpenPoint(FlightConfig.Waypoint w) {
+        return !FlightConfig.hunt || w.result == null || w.result.isEmpty() || w.result.equals("empty");
+    }
+
+    /** True when start() would find at least one point to fly to. */
+    public static boolean hasQueuePoint() {
+        for (FlightConfig.Waypoint w : FlightConfig.waypoints) {
+            if (isOpenPoint(w)) return true;
+        }
+        return false;
+    }
+
+    /** Rockets that prepare() asks for the first leg (nearest open point), or -1 when there is no point. */
+    public static int firstLegRocketsNeeded(ClientPlayerEntity p) {
+        double best = Double.MAX_VALUE;
+        for (FlightConfig.Waypoint w : FlightConfig.waypoints) {
+            if (!isOpenPoint(w)) continue;
+            best = Math.min(best, distanceTo(p, w));
+        }
+        if (best == Double.MAX_VALUE) return -1;
+        return (int) Math.ceil(best / START_BLOCKS_PER_ROCKET * 1.3) + FlightConfig.reserveRockets;
+    }
+
+    /** Rockets the player has now (hotbar and inventory). */
+    public static int rocketCount(ClientPlayerEntity p) {
+        return countRockets(p);
+    }
+
+    /**
+     * Would FlightRunner.start() + prepare() really get the player flying? Returns null if yes, otherwise the reason.
+     * The ship routine asks this BEFORE it leaves the tunnel, so nobody jumps out and then finds the flight refuses.
+     * extraRockets = safety margin (the player moves a little before prepare() runs).
+     */
+    public static String startRefusal(MinecraftClient client, int extraRockets) {
+        ClientPlayerEntity p = client.player;
+        if (p == null) return "no player";
+        if (FlightConfig.waypoints.isEmpty()) return "there are no points in the list";
+        if (!hasQueuePoint()) return "queue finished: every point already has a result";
+        boolean elytraOk = elytraWorn(p);
+        if (!elytraOk) {
+            PlayerScreenHandler h = p.playerScreenHandler;
+            for (int s = 9; s <= 44 && !elytraOk; s++) elytraOk = h.getSlot(s).getStack().isOf(Items.ELYTRA);
+        }
+        if (!elytraOk) return "no elytra to fly with";
+        if (hotbarSlot(p, Items.FIREWORK_ROCKET) < 0) return "no firework rockets in the hotbar";
+        if (FlightConfig.pearlRescue && hotbarSlot(p, Items.ENDER_PEARL) < 0) return "no ender pearl in the hotbar (pearl rescue is on)";
+        int need = firstLegRocketsNeeded(p);
+        int have = countRockets(p);
+        if (have < need + extraRockets) {
+            return "need about " + (need + extraRockets) + " rockets for the first leg, you have " + have;
+        }
+        return null;
+    }
+
+    /** The ship routine gives the ground it fell back on (a glide exit starts in the air, so start() cannot know it). */
+    public static void setFallbackIsland(double x, double y, double z) {
+        fallbackKnown = true;
+        fallbackFresh = true;
+        fallbackX = (int) Math.floor(x);
+        fallbackY = (int) Math.floor(y);
+        fallbackZ = (int) Math.floor(z);
+    }
+
+    /** Remember a ship we looted (its shulkers move when we break the block under them). */
+    public static void rememberLootedShip(double x, double z) {
+        for (double[] s : lootedShips) {
+            if (Math.hypot(s[0] - x, s[1] - z) < 8) return;
+        }
+        lootedShips.add(new double[]{x, z});
+        FlightRecorder.event("Looted ship remembered at " + fmt(x) + "," + fmt(z) + " (shulkers within "
+                + (int) LOOTED_IGNORE_RADIUS + " blocks are ignored from now on)");
+    }
+
+    private static boolean nearLootedShip(double x, double z) {
+        for (double[] s : lootedShips) {
+            if (Math.hypot(s[0] - x, s[1] - z) <= LOOTED_IGNORE_RADIUS) return true;
+        }
+        return false;
+    }
+
+    /** Island used for emergencies: the scanned one, else the fallback. False = no ground known at all. */
+    private static boolean ensureIsland() {
+        if (islandKnown) return true;
+        if (!fallbackKnown) return false;
+        islandX = fallbackX;
+        islandY = fallbackY;
+        islandZ = fallbackZ;
+        islandKnown = true;
+        return true;
+    }
+
+    /** In the air with known ground: land there instead of stopping. Otherwise stop. */
+    private static void stopOrLand(MinecraftClient client, String message) {
+        ClientPlayerEntity p = client.player;
+        if (p != null && !p.isOnGround() && ensureIsland()) {
+            emergency = true;
+            shipLanding = false;
+            spotSet = false;
+            frameTarget = null;
+            orbiting = false;
+            firstRocketPending = false;
+            state = State.CRUISE;
+            msg(client, message + " - landing on the nearest ground");
+            debug(client, "Not stopping in the air: " + message + "; emergency landing at " + islandX + "," + islandY + "," + islandZ);
+            return;
+        }
+        stop(client, message);
+    }
 
     public static void resumeAfterLandingFailure(MinecraftClient client) {
         if (state != State.PAUSED_FAILURE || client == null || client.player == null) return;
@@ -415,7 +549,7 @@ public final class FlightRunner {
 
     private static void takeoff(MinecraftClient client) {
         if (target == null) {
-            stop(client, "Auto Elytra: no destination left");
+            stopOrLand(client, "Auto Elytra: no destination left");
             return;
         }
         ClientPlayerEntity p = client.player;
@@ -430,8 +564,12 @@ public final class FlightRunner {
         }
         aimXZ(p, target.x + 0.5, target.z + 0.5, 0f);
         takeoffTimer++;
+        // the elytra did not open (glide exit from the ship): the normal pearl rescue must work here too
+        if (!p.isOnGround() && FlightConfig.pearlRescue && p.getY() < FlightConfig.pearlBelowY && ticks - lastPearl > 40) {
+            throwPearl(client);
+        }
         if (takeoffTimer > 120) {
-            stop(client, "Auto Elytra: could not start gliding");
+            stopOrLand(client, "Auto Elytra: could not start gliding");
             return;
         }
         switch (takeoffStage) {
@@ -497,7 +635,7 @@ public final class FlightRunner {
         boolean island = emergency && islandKnown;
         if (!island && target == null) {
             // nothing left to fly to (this crashed v1.9.7): land on the nearest island, or stop
-            if (islandKnown) {
+            if (ensureIsland()) {
                 emergency = true;
                 shipLanding = false;
                 spotSet = false;
@@ -572,8 +710,16 @@ public final class FlightRunner {
                                 if (scan.verdict.equals("untouched")) {
                                     setShipLanding(client, scan.centerX, scan.centerY, scan.centerZ, "third shulker in place");
                                 } else if (scan.verdict.equals("looted") && shipDist <= 120) {
-                                    skipPoint(client, "looted", "looks looted (" + lastScanNote + ")");
-                                    return;
+                                    // the ship must really belong to THIS point (the point itself can be off by a few dozen blocks)
+                                    double fromPoint = Math.hypot(scan.centerX - (target.x + 0.5), scan.centerZ - (target.z + 0.5));
+                                    if (fromPoint <= LOOTED_MAX_FROM_POINT) {
+                                        skipPoint(client, "looted", "looks looted (" + lastScanNote + ")");
+                                        return;
+                                    }
+                                    if (ticks % 40 == 0) {
+                                        debug(client, "Looted verdict ignored: ship centre is " + fmt(fromPoint)
+                                                + " blocks from the point (limit " + (int) LOOTED_MAX_FROM_POINT + ")");
+                                    }
                                 }
                             }
                         }
@@ -815,7 +961,7 @@ public final class FlightRunner {
                 if (ticks - lastRocket >= 12) {
                     if (rocketTries >= 5) {
                         debug(client, "First rocket failed verification after 3 attempts; stopping flight");
-                        stop(client, "Auto Elytra: the first rocket does nothing (5 tries) - check your hotbar rockets");
+                        stopOrLand(client, "Auto Elytra: the first rocket does nothing (5 tries) - check your hotbar rockets");
                         return;
                     }
                     rocketSpeedBefore = speed;
@@ -1139,14 +1285,19 @@ public final class FlightRunner {
         alertLeft = 100;
         String text = "ELYTRA FOUND at " + name + (note == null ? "" : " (" + note + ")")
                 + " - take it, then press the flight key to go on";
-        if (client.player != null) {
-            double ax = frameTarget != null ? frameTarget.getX() : client.player.getX();
-            double ay = frameTarget != null ? frameTarget.getY() : client.player.getY();
-            double az = frameTarget != null ? frameTarget.getZ() : client.player.getZ();
+        double ax = 0, ay = 0, az = 0;
+        boolean haveFrame = client.player != null;
+        if (haveFrame) {
+            ax = frameTarget != null ? frameTarget.getX() : client.player.getX();
+            ay = frameTarget != null ? frameTarget.getY() : client.player.getY();
+            az = frameTarget != null ? frameTarget.getZ() : client.player.getZ();
             FlightRecorder.startTeach(client, ax, ay, az);
+            rememberLootedShip(ax, az);
         }
         stop(client, text);
         if (client.player != null) client.player.sendMessage(Text.literal(text), false);
+        // explicit call (v2.0.2): the ship routine is armed here, no more text matching on the stop message
+        if (haveFrame) FlightShipRoutine.onShipFound(client, ax, ay, az);
     }
 
     private static void enterPause(MinecraftClient client) {
@@ -1258,7 +1409,7 @@ public final class FlightRunner {
     /** No more points. In the air: land at the nearest island instead of just stopping. */
     private static void queueEmpty(MinecraftClient client) {
         ClientPlayerEntity p = client.player;
-        if (p != null && !p.isOnGround() && islandKnown) {
+        if (p != null && !p.isOnGround() && ensureIsland()) {
             emergency = true;
             shipLanding = false;
             spotSet = false;
@@ -1306,8 +1457,10 @@ public final class FlightRunner {
     private static ShulkerScan scanShulkers(MinecraftClient client, double x, double z, double radius) {
         double bottom = client.world.getBottomY();
         Box box = new Box(x - radius, bottom, z - radius, x + radius, bottom + 400, z + radius);
-        List<ShulkerEntity> found = client.world.getEntitiesByClass(ShulkerEntity.class, box,
-                e -> !e.isRemoved());
+        List<ShulkerEntity> found = new ArrayList<>(client.world.getEntitiesByClass(ShulkerEntity.class, box,
+                e -> !e.isRemoved()));
+        // a ship we looted ourselves has moved shulkers: they must never look like a looted next point
+        found.removeIf(e -> nearLootedShip(e.getX(), e.getZ()));
         if (found.size() < 2) {
             lastScanNote = "fewer than 2 shulkers loaded";
             return new ShulkerScan(found, "unknown", 0, 0, 0, Double.MAX_VALUE);
@@ -1429,7 +1582,7 @@ public final class FlightRunner {
         boolean rocketsLow = countRockets(p) < need;
         if (state == State.LAND) rocketsLow = false;      // landing needs no rockets
         if (elytraLow || healthLow || rocketsLow) {
-            if (islandKnown) {
+            if (ensureIsland()) {
                 emergency = true;
                 state = State.CRUISE;
                 msg(client, "Auto Elytra: " + (elytraLow ? "elytra low" : healthLow ? "health low" : "rockets low")
@@ -1494,7 +1647,7 @@ public final class FlightRunner {
     private static void throwPearl(MinecraftClient client) {
         ClientPlayerEntity p = client.player;
         int slot = hotbarSlot(p, Items.ENDER_PEARL);
-        if (slot < 0 || !islandKnown) return;
+        if (slot < 0 || !ensureIsland()) return;
         lastPearl = ticks;
         double dx = islandX + 0.5 - p.getX(), dz = islandZ + 0.5 - p.getZ();
         double d = Math.hypot(dx, dz);
