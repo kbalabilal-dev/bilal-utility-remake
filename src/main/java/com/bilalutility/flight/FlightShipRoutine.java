@@ -99,6 +99,7 @@ public final class FlightShipRoutine {
     private static ShulkerEntity frameThreat;
     private static int frameThreatAttackCd;
     private static double fx, fy, fz;
+    private static double frameApproachA;
     private static int fdx, fdz, ldx, ldz;
     private static String facingName = "";
     private static double pendX, pendY, pendZ;
@@ -779,15 +780,25 @@ public final class FlightShipRoutine {
 
         switch (sub) {
             case 0 -> {
-                int r = walkTo(c, p, wx(SPOT_FRAME[0], SPOT_FRAME[1]), wz(SPOT_FRAME[0], SPOT_FRAME[1]), 0.3, false);
+                // First line up sideways with the frame's safe ledge. Keeping the
+                // current forward coordinate avoids cutting diagonally across its step.
+                if (subTick == 1) frameApproachA = localA(p.getX(), p.getZ());
+                int r = walkTo(c, p, wx(frameApproachA, SPOT_FRAME[1]), wz(frameApproachA, SPOT_FRAME[1]), 0.3, false);
                 if (r == W_UNSAFE) abort(c, "unsafe path: a wall or a drop blocks the way");
-                else if (r == W_STUCK) abort(c, "stuck on the way to the frame");
-                else if (r == W_ARRIVED) {
-                    if (Math.abs(p.getY() - (fy + SPOT_FRAME[2])) > 0.7) abort(c, "not on the ledge in front of the frame");
-                    else go(1);
-                }
+                else if (r == W_STUCK) abort(c, "stuck while lining up beside the frame");
+                else if (r == W_ARRIVED) go(1);
             }
             case 1 -> {
+                // Now approach straight along the frame axis at the lined-up left offset.
+                int r = walkTo(c, p, wx(SPOT_FRAME[0], SPOT_FRAME[1]), wz(SPOT_FRAME[0], SPOT_FRAME[1]), 0.3, false);
+                if (r == W_UNSAFE) abort(c, "unsafe path: a wall or a drop blocks the way");
+                else if (r == W_STUCK) abort(c, "stuck on the straight approach to the frame");
+                else if (r == W_ARRIVED) {
+                    if (Math.abs(p.getY() - (fy + SPOT_FRAME[2])) > 0.7) abort(c, "not on the ledge in front of the frame");
+                    else go(2);
+                }
+            }
+            case 2 -> {
                 String why = standCheck(c, p);
                 if (why != null) {
                     abort(c, why);
@@ -800,13 +811,13 @@ public final class FlightShipRoutine {
                         c.interactionManager.attackEntity(p, frame);
                         p.swingHand(Hand.MAIN_HAND);
                         hitTries++;
-                        go(2);
+                        go(3);
                     }
                 } else if (subTick > 100) {
                     abort(c, "cannot aim at the frame");
                 }
             }
-            case 2 -> {
+            case 3 -> {
                 int cnt = countElytra(p);
                 if (cnt > elytraBefore) {
                     finishStep(c, "OK", "elytra=" + elytraBefore + "->" + cnt + " after_hit_ticks=" + subTick
@@ -814,23 +825,31 @@ public final class FlightShipRoutine {
                     return;
                 }
                 if (subTick > 60) {
-                    if (frame.getHeldItemStack().isOf(Items.ELYTRA) && hitTries < 3) go(1);
+                    if (frame.getHeldItemStack().isOf(Items.ELYTRA) && hitTries < 3) go(2);
                     else abort(c, frame.getHeldItemStack().isOf(Items.ELYTRA) ? "the frame still has the elytra" : "the elytra was not picked up");
                 }
             }
             case 10 -> handleFrameShulker(c, p);
             case 11 -> {
-                // Return to the normal frame-collection position; do not restart the ship routine.
+                // Return sideways to the frame's left offset before moving forward.
+                if (subTick == 1) frameApproachA = localA(p.getX(), p.getZ());
+                int r = walkTo(c, p, wx(frameApproachA, SPOT_FRAME[1]), wz(frameApproachA, SPOT_FRAME[1]), 0.3, false);
+                if (r == W_UNSAFE) abort(c, "unsafe wall or drop while lining up with the item frame");
+                else if (r == W_STUCK) abort(c, "stuck while lining up with the item frame after the shulker");
+                else if (r == W_ARRIVED) go(12);
+            }
+            case 12 -> {
+                // Finish the return with a straight approach along the frame axis.
                 int r = walkTo(c, p, wx(SPOT_FRAME[0], SPOT_FRAME[1]), wz(SPOT_FRAME[0], SPOT_FRAME[1]), 0.3, false);
-                if (r == W_UNSAFE) abort(c, "unsafe wall or drop while returning to the item frame");
-                else if (r == W_STUCK) abort(c, "stuck while returning to the item frame after the shulker");
+                if (r == W_UNSAFE) abort(c, "unsafe wall or drop on the straight return to the item frame");
+                else if (r == W_STUCK) abort(c, "stuck on the straight return to the item frame");
                 else if (r == W_ARRIVED) {
                     int pick = pickaxeSlot(p);
                     if (pick >= 0) p.getInventory().setSelectedSlot(pick);
                     if (Math.abs(p.getY() - (fy + SPOT_FRAME[2])) > 0.7) abort(c, "returned near the frame but not to its safe ledge");
                     else {
                         FlightRecorder.routine("FRAME_SHULKER_CLEARED return=" + local(p.getX(), p.getY(), p.getZ()));
-                        go(1);
+                        go(2);
                     }
                 }
             }
@@ -1445,16 +1464,21 @@ public final class FlightShipRoutine {
         p.setPitch(p.getPitch() + clampF(18f - p.getPitch(), -4f, 4f));
         boolean aligned = Math.abs(MathHelper.wrapDegrees(wantYaw - p.getYaw())) < 18f;
         boolean press = aligned && (dist > 0.7 || now % 3 == 0);       // short taps when close
-        if (press && walkWallAhead(c, p, dx / dist, dz / dist)
-                && !(p.isOnGround() && stepAhead(c, p, dx / dist, dz / dist))) {
+        boolean bodyBlocked = press && walkBodyAhead(c, p, dx / dist, dz / dist, 0.0);
+        boolean raisedFree = press && !walkBodyAhead(c, p, dx / dist, dz / dist, 1.0);
+        boolean realWall = press && walkWallAhead(c, p, dx / dist, dz / dist);
+        if (realWall) {
+            BlockPos ahead = walkBlockAhead(p, dx / dist, dz / dist);
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
-            FlightRecorder.routine("WALK_BLOCKED_BY_WALL pos=" + local(p.getX(), p.getY(), p.getZ())
-                    + " target=" + fmt(tx) + "," + fmt(tz));
+            FlightRecorder.routine("WALK_BLOCKED pos=" + local(p.getX(), p.getY(), p.getZ())
+                    + " blockAhead=" + blockId(c, ahead) + " raisedFree=" + raisedFree);
             return W_UNSAFE;
         }
         c.options.forwardKey.setPressed(press);
-        c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.4 && stepAhead(c, p, dx / dist, dz / dist));
+        // A collision that disappears when the body is raised is a step, not a wall.
+        // Jump only from the ground; while airborne, keep moving without aborting.
+        c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.4 && bodyBlocked && raisedFree);
         if (dist < walkBest - 0.05) {
             walkBest = dist;
             stuckTicks = 0;
@@ -1464,30 +1488,24 @@ public final class FlightShipRoutine {
         return stuckTicks > 45 ? W_STUCK : W_MOVING;
     }
 
-    /** Checks the player's full body a short distance ahead so the routine never walks into a solid wall. */
+    /** True when the unraised body hits something but the same body raised by one block is clear. */
     private static boolean walkWallAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz) {
+        return walkBodyAhead(c, p, ux, uz, 0.0) && walkBodyAhead(c, p, ux, uz, 1.0);
+    }
+
+    private static boolean walkBodyAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz, double raise) {
         Box body = p.getBoundingBox();
         for (double distance : new double[]{0.25, 0.50, 0.75}) {
-            Box future = body.offset(ux * distance, 0.0, uz * distance);
+            Box future = body.offset(ux * distance, raise, uz * distance);
             if (c.world.getBlockCollisions(p, future).iterator().hasNext()) return true;
         }
         return false;
     }
 
-    /** Detects a one-block step across the player's width, with two blocks of headroom. */
-    private static boolean stepAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz) {
-        int by = MathHelper.floor(p.getY() + 0.05);
-        double px = -uz, pz = ux;
-        // Check the centre and both sides of the player's collision width. The old
-        // single-point check could miss a step when the centre ray passed its edge.
-        for (double side : new double[]{0.0, -0.25, 0.25}) {
-            int bx = MathHelper.floor(p.getX() + ux * 0.65 + px * side);
-            int bz = MathHelper.floor(p.getZ() + uz * 0.65 + pz * side);
-            if (solid(c, bx, by, bz) && !solid(c, bx, by + 1, bz) && !solid(c, bx, by + 2, bz)) {
-                return true;
-            }
-        }
-        return false;
+    /** Approximate block at the leading edge, for an actionable wall diagnostic. */
+    private static BlockPos walkBlockAhead(ClientPlayerEntity p, double ux, double uz) {
+        return new BlockPos(MathHelper.floor(p.getX() + ux * 0.65),
+                MathHelper.floor(p.getY() + 0.05), MathHelper.floor(p.getZ() + uz * 0.65));
     }
 
     /** Looks up to 6 blocks ahead; every single step down must be smaller than 4 blocks and ground must exist. */
