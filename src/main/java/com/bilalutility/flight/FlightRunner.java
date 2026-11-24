@@ -1227,7 +1227,8 @@ public final class FlightRunner {
         state = State.LAND;
         if (client.player != null) debug(client, "Landing phase entered: player=" + fmt(client.player.getX())
                 + "," + fmt(client.player.getY()) + "," + fmt(client.player.getZ())
-                + ", roofY=" + fmt(shipRoofY) + ", destination=" + (target == null ? "none" : target.name));
+                + ", roofY=" + fmt(shipRoofY) + ", refY=" + fmt(refY) + ", anchorY=" + fmt(shipAnchorY)
+                + ", shipLanding=" + shipLanding + ", destination=" + (target == null ? "none" : target.name));
         orbiting = false;
         nearGroundTicks = 0;
         recoveryRockets = 0;
@@ -1791,8 +1792,19 @@ public final class FlightRunner {
 
     /** Real ground straight below the player (top of the first solid block), NaN if none within maxDown. */
     private static double groundBelow(MinecraftClient client, ClientPlayerEntity p, int maxDown) {
-        int x = (int) Math.floor(p.getX()), z = (int) Math.floor(p.getZ());
-        int y0 = (int) Math.floor(p.getY() - 0.01);
+        // The centre column first; when it has nothing (the player hangs over a gap or a block edge, which gave a
+        // false "surfaceY=unknown" touchdown in the log) use the best of the four columns under the 0.6 wide box.
+        double best = groundInColumn(client, (int) Math.floor(p.getX()), (int) Math.floor(p.getZ()), p.getY(), maxDown);
+        if (!Double.isNaN(best)) return best;
+        for (double[] o : new double[][]{{0.25, 0}, {-0.25, 0}, {0, 0.25}, {0, -0.25}}) {
+            double g = groundInColumn(client, (int) Math.floor(p.getX() + o[0]), (int) Math.floor(p.getZ() + o[1]), p.getY(), maxDown);
+            if (!Double.isNaN(g) && (Double.isNaN(best) || g > best)) best = g;
+        }
+        return best;
+    }
+
+    private static double groundInColumn(MinecraftClient client, int x, int z, double feetY, int maxDown) {
+        int y0 = (int) Math.floor(feetY - 0.01);
         int bottom = Math.max(client.world.getBottomY(), y0 - maxDown);
         for (int y = y0; y >= bottom; y--) {
             if (solid(client, x, y, z)) return y + 1;

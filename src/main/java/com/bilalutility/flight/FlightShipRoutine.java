@@ -75,8 +75,14 @@ public final class FlightShipRoutine {
     private static final double[] EXIT_FLOOR = {-0.5, 1.0, -1.5};
     // standing spots, local (a, left, feet height)
     private static final double[] SPOT_FRAME = {0.7, 0.2, -1.5};
-    private static final double[] SPOT_DIG = {0.8, 1.2, -0.5};
-    private static final double[] SPOT_PEARL = {-0.8, 1.3, -0.5};
+    // Dig stance = CENTRE of the chest top (chest block: a 0..1, left 0.5..1.5, top 0.875 high). The old stance
+    // (0.8, 1.2) put the player's box flush against the ship's side wall at left=1.5.
+    private static final double[] SPOT_DIG = {0.5, 1.0, -0.625};
+    // Pearl stance = CENTRE of the one-block tunnel floor (a -1..0, left 0.5..1.5, floor top h=-0.5). The old stance
+    // (-0.8, 1.3) hung 0.1 over both edges of that block.
+    private static final double[] SPOT_PEARL = {-0.5, 1.0, -0.5};
+    // the chest block (bottom edge h=-1.5) between the frame ledge and the tunnel
+    private static final double[] CHEST_BLOCK = {0.5, 1.0, -1.5};
     // where to aim on a block (offsets from its centre), tried one after the other
     private static final double[][] AIM = {{0, 0, 0}, {0, 0.35, 0}, {0.35, 0, 0}, {-0.35, 0, 0}, {0, 0, 0.35}, {0, 0, -0.35}, {0, -0.35, 0}};
 
@@ -96,6 +102,8 @@ public final class FlightShipRoutine {
     // weakening the ground/drop safety check.
     private static int navigationRetries;
     private static boolean navigationRetryResume;
+    private static final int MAX_NAV_RETRIES = 3;
+    private static double navLastX = Double.NaN, navLastY, navLastZ, navLastBest = 1e9;
     private static boolean chestClimbActive, chestClimbJumpIssued;
     private static double chestClimbX, chestClimbZ, chestClimbTop;
     private static int chestClimbTicks, chestClimbGroundTicks;
@@ -374,6 +382,10 @@ public final class FlightShipRoutine {
 
     private static void beginStep(MinecraftClient c, String trigger) {
         navigationRetryResume = false;
+        navigationRetries = 0;
+        navLastX = Double.NaN;
+        navLastBest = 1e9;
+        routePhase = "";
         ClientPlayerEntity p = c.player;
         Step s = STEPS[stepIndex];
         if (glideAsk) {
@@ -430,6 +442,8 @@ public final class FlightShipRoutine {
         glideAsk = false;
         glideConfirmed = false;
         navigationRetries = 0;
+        navLastX = Double.NaN;
+        navLastBest = 1e9;
         navigationRetryResume = false;
         chestClimbActive = false;
         chestClimbJumpIssued = false;
@@ -478,13 +492,16 @@ public final class FlightShipRoutine {
     }
 
     /**
-     * Full Auto navigation watchdog shared by every movement sub-step. It resumes the
-     * same sub-step after a short pause (rather than re-arming the whole step), so an
-     * Elytra already taken from the frame or a shulker sub-state is never replayed.
-     * Safety checks remain active on every new route attempt.
+     * Full Auto navigation watchdog shared by every movement sub-step. It does NOT repeat the same attempt forever:
+     * a retry is only allowed when the last attempt made progress (the player moved at least 0.25 blocks, or got at
+     * least 0.15 closer to the target), at most MAX_NAV_RETRIES times per step. Every retry re-plans: the route state is
+     * cleared, so the next attempt starts from where the player really is (ledge, chest top or tunnel floor).
+     * When there is no progress it gives up (returns false): the caller stops with a clear reason and a diagnostic dump.
      */
     private static boolean retryNavigation(MinecraftClient c, String reason) {
         if (FlightConfig.routineMode != 2) return false;
+        ClientPlayerEntity p = c == null ? null : c.player;
+        if (p == null) return false;
         Step s = STEPS[Math.min(stepIndex, STEPS.length - 1)];
         boolean navigationSub = switch (s) {
             case DROP -> sub == 0 || sub == 3;
@@ -494,6 +511,22 @@ public final class FlightShipRoutine {
             default -> false;
         };
         if (!navigationSub) return false;
+
+        double moved = Double.isNaN(navLastX) ? 99.0
+                : Math.sqrt(sq(p.getX() - navLastX) + sq(p.getY() - navLastY) + sq(p.getZ() - navLastZ));
+        boolean closer = walkBest < navLastBest - 0.15;
+        boolean progress = navigationRetries == 0 || moved >= 0.25 || closer;
+        if (!progress || navigationRetries >= MAX_NAV_RETRIES) {
+            FlightRecorder.routine("NAV_GIVE_UP step=" + s + " sub=" + sub + " retries=" + navigationRetries
+                    + " moved=" + f2(moved) + " reason=" + reason.replace(' ', '_')
+                    + (progress ? "_retry_limit" : "_no_progress"));
+            diag(c, p, "NAV_GIVE_UP");
+            return false;
+        }
+        navLastX = p.getX();
+        navLastY = p.getY();
+        navLastZ = p.getZ();
+        navLastBest = Math.min(navLastBest, walkBest);
 
         releaseKeys(c);
         navigationRetries++;
@@ -509,14 +542,12 @@ public final class FlightShipRoutine {
         chestClimbJumpIssued = false;
         chestClimbTicks = 0;
         chestClimbGroundTicks = 0;
+        routePhase = "";
         phase = Phase.DELAY;
-        delayLeft = Math.min(80, 10 + navigationRetries * 5);
-        FlightRecorder.routine("NAV_WATCHDOG step=" + s + " sub=" + sub + " retry=" + navigationRetries
-                + " delay=" + delayLeft + " reason=" + reason.replace(' ', '_'));
-        if (c != null && c.player != null && navigationRetries % 5 == 0) {
-            c.player.sendMessage(Text.literal("Ship routine: still navigating safely (retry "
-                    + navigationRetries + ")."), true);
-        }
+        delayLeft = 10 + navigationRetries * 5;
+        FlightRecorder.routine("NAV_REPLAN step=" + s + " sub=" + sub + " retry=" + navigationRetries + "/" + MAX_NAV_RETRIES
+                + " moved=" + f2(moved) + " loc=" + locName(locate(c, p)) + " delay=" + delayLeft
+                + " reason=" + reason.replace(' ', '_'));
         return true;
     }
 
@@ -601,9 +632,16 @@ public final class FlightShipRoutine {
                     if (!st.isAir() && !isPurpur(st)) return "unexpected block " + blockId(c, blockAt(g)) + " in the exit tunnel";
                 }
                 if (!solid(c, blockAt(EXIT_FLOOR))) return "the tunnel has no floor block";
+                String chest = chestProblem(c);
+                if (chest != null) return chest;
             }
             case PEARL_OUT -> {
                 if (hotbarSlot(p, Items.ENDER_PEARL) < 0) return "no ender pearl in the hotbar";
+                // never walk through a block that is still there: both planned exit blocks must be gone
+                String tunnel = tunnelProblem(c);
+                if (tunnel != null) return tunnel;
+                String chest = chestProblem(c);
+                if (chest != null) return chest;
                 // never leave the ship if the flight could not start afterwards
                 String refusal = FlightRunner.startRefusal(c, 0);
                 if (refusal != null) return "the flight could not start after leaving: " + refusal;
@@ -1154,19 +1192,32 @@ public final class FlightShipRoutine {
         BlockPos t1 = blockAt(EXIT_UP), t2 = blockAt(EXIT_LOW);
         switch (sub) {
             case 0 -> {
-                int r = walkTo(c, p, wx(SPOT_DIG[0], SPOT_DIG[1]), wz(SPOT_DIG[0], SPOT_DIG[1]), 0.42, false);
+                // ledge -> (approach, one jump, verified landing) -> chest top -> centre of the chest
+                if (subTick == 1) routeBegin(c, p);
+                int r = walkTo(c, p, wx(SPOT_DIG[0], SPOT_DIG[1]), wz(SPOT_DIG[0], SPOT_DIG[1]), 0.20, false);
                 if (r == W_UNSAFE) {
-                    if (!retryNavigation(c, "unsafe path: wall or drop")) abort(c, "unsafe path: a wall or a drop blocks the way");
+                    if (!retryNavigation(c, "unsafe path: wall or drop")) abort(c, "unsafe path to the chest top (see the DIAG lines in the log)");
                 } else if (r == W_STUCK) {
-                    if (!retryNavigation(c, "stuck on the way to the tunnel")) abort(c, "stuck on the way to the tunnel");
+                    if (!retryNavigation(c, "stuck on the way to the chest")) abort(c, "stuck on the way to the chest top");
                 }
                 else if (r == W_ARRIVED) {
-                    if (Math.abs(p.getY() - (fy + SPOT_DIG[2])) > 0.7) abort(c, "not at the tunnel spot (Y " + fmt(p.getY()) + ")");
-                    else go(1);
+                    int loc = locate(c, p);
+                    if (loc != L_CHEST) {
+                        diag(c, p, "DIG_STANCE_REJECTED");
+                        abort(c, "not standing on the chest top (" + locName(loc) + ", " + local(p.getX(), p.getY(), p.getZ()) + ")");
+                    } else {
+                        routeNote(p, "ARRIVED_DIG_STANCE");
+                        go(1);
+                    }
                 }
             }
             case 1, 3 -> {
                 if (!waited(3, 9)) return;
+                if (locate(c, p) != L_CHEST) {
+                    diag(c, p, "LEFT_DIG_STANCE");
+                    abort(c, "you are no longer on the chest top (" + local(p.getX(), p.getY(), p.getZ()) + ")");
+                    return;
+                }
                 String why = standCheck(c, p);
                 if (why != null) {
                     abort(c, why);
@@ -1199,15 +1250,27 @@ public final class FlightShipRoutine {
         }
         switch (sub) {
             case 0 -> {
-                int r = walkTo(c, p, wx(SPOT_PEARL[0], SPOT_PEARL[1]), wz(SPOT_PEARL[0], SPOT_PEARL[1]), 0.42, false);
+                // Two legs: ledge -> chest centre (the explicit chest climb), then chest centre -> tunnel centre.
+                if (subTick == 1) routeBegin(c, p);
+                int loc = locate(c, p);
+                double[] goal = (loc == L_LEDGE || loc == L_UNKNOWN) ? SPOT_DIG : SPOT_PEARL;
+                int r = walkTo(c, p, wx(goal[0], goal[1]), wz(goal[0], goal[1]), 0.20, false);
                 if (r == W_UNSAFE) {
-                    if (!retryNavigation(c, "unsafe route to pearl spot")) abort(c, "unsafe path: a wall or a drop blocks the way");
+                    if (!retryNavigation(c, "unsafe route to pearl spot")) abort(c, "unsafe path to the pearl spot (see the DIAG lines in the log)");
                 } else if (r == W_STUCK) {
                     if (!retryNavigation(c, "stuck on the way to pearl spot")) abort(c, "stuck on the way to the pearl spot");
                 }
                 else if (r == W_ARRIVED) {
-                    if (Math.abs(p.getY() - (fy + SPOT_PEARL[2])) > 0.7) abort(c, "not at the pearl spot (Y " + fmt(p.getY()) + ")");
-                    else go(1);
+                    int at = locate(c, p);
+                    if (at == L_TUNNEL && goal == SPOT_PEARL) {
+                        routeNote(p, "ARRIVED_PEARL_STANCE");
+                        go(1);
+                    } else if (at == L_CHEST && goal == SPOT_DIG) {
+                        routeNote(p, "ON_CHEST_CENTRED");     // next tick: second leg into the tunnel
+                    } else {
+                        diag(c, p, "PEARL_STANCE_REJECTED");
+                        abort(c, "not at the pearl stance (" + locName(at) + ", " + local(p.getX(), p.getY(), p.getZ()) + ")");
+                    }
                 }
             }
             case 1 -> {
@@ -1481,7 +1544,10 @@ public final class FlightShipRoutine {
 
     private static String standCheck(MinecraftClient c, ClientPlayerEntity p) {
         double top = groundTop(c, p.getX(), p.getY() - 0.01, p.getZ(), 3);
-        if (Double.isNaN(top) || p.getY() - top > 3.0) return "no solid block within 3 blocks under your feet";
+        if (Double.isNaN(top) || p.getY() - top > 3.0) {
+            diag(c, p, "STAND_CHECK_FAILED");
+            return "no solid block within 3 blocks under your feet";
+        }
         return null;
     }
 
@@ -1566,13 +1632,20 @@ public final class FlightShipRoutine {
         return Math.max(lo, Math.min(hi, v));
     }
 
+    private static final int P_CLEAR = 0, P_STEP = 1, P_JUMP = 2, P_WALL = 3;
+    private static final double STEP_HEIGHT = 0.6, JUMP_HEIGHT = 1.25, SUPPORT_INSET = 0.25;
+    // details of the last probeAhead() call (used for the chest climb and for the log)
+    private static double probeNeed, probeTop;
+    private static String probeBlock = "";
+    private static BlockPos probePos;
+
     private static int walkTo(MinecraftClient c, ClientPlayerEntity p, double tx, double tz, double tol, boolean allowDrop) {
         if (chestClimbActive) return continueChestClimb(c, p);
         double dx = tx - p.getX(), dz = tz - p.getZ();
         double dist = Math.hypot(dx, dz);
-        // Player collision width means the route does not need to hit a block centre
-        // to stand beside/on it. A wider stop radius prevents tiny correction orbits.
-        double arriveTol = allowDrop ? Math.max(tol, 0.08) : Math.max(tol, 0.40);
+        // The player's box is 0.6 wide, so the route does not need to hit the exact point.
+        // Callers that need a precise stance (chest centre, tunnel centre) pass 0.20.
+        double arriveTol = allowDrop ? Math.max(tol, 0.08) : Math.max(tol, 0.15);
         if (dist < arriveTol) {
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
@@ -1589,60 +1662,49 @@ public final class FlightShipRoutine {
         boolean press = aligned && (dist > 0.55 || now % 2 == 0);
 
         double ux = dx / dist, uz = dz / dist;
-        BlockPos ahead = walkBlockAhead(p, ux, uz);
-        BlockState aheadState = c.world.getBlockState(ahead);
-        String aheadId = Registries.BLOCK.getId(aheadState.getBlock()).toString();
-        boolean chestStep = aheadId.contains("chest");
-        double chestTop = collisionTop(aheadState, c, ahead);
-        double chestTopY = ahead.getY() + chestTop;
-        double chestClearanceRaise = Math.max(0.0, chestTopY - p.getY() + 0.06);
-        boolean bodyBlocked = press && walkBodyAhead(c, p, ux, uz, 0.0);
-        boolean raisedBlocked = press && walkBodyAhead(c, p, ux, uz, 1.0);
+        // Look only as far as the player will really move: never past the target. (The old probe looked
+        // 0.75 blocks ahead even when the target was 0.5 away, and so "saw" the ship wall behind the target.)
+        int kind = press ? probeAhead(c, p, ux, uz, Math.min(0.75, dist + 0.05)) : P_CLEAR;
 
-        // Measure the chest's actual collision top in world coordinates. The old
-        // check incorrectly treated the player's feet as if they were at the
-        // chest block's bottom, so its raised probe could still overlap the chest.
-        // A vanilla jump can clear at most roughly 1.25 blocks; higher targets are
-        // not misclassified as climbable steps.
-        boolean chestJumpClear = chestStep && chestTop > 0.0 && chestClearanceRaise <= 1.25
-                && !walkBodyAhead(c, p, ux, uz, chestClearanceRaise);
-        if (chestStep && chestJumpClear && bodyBlocked && p.isOnGround()) {
+        // A chest that is higher than the feet but can be jumped on: explicit climb
+        // (approach, ONE jump, steer in the air, confirmed landing on top).
+        if (kind == P_JUMP && probePos != null && probeBlock.contains("chest") && p.isOnGround()) {
             chestClimbActive = true;
             chestClimbJumpIssued = false;
-            chestClimbX = ahead.getX() + 0.5;
-            chestClimbZ = ahead.getZ() + 0.5;
-            chestClimbTop = chestTopY;
+            chestClimbX = probePos.getX() + 0.5;
+            chestClimbZ = probePos.getZ() + 0.5;
+            chestClimbTop = probeTop;
             chestClimbTicks = 0;
             chestClimbGroundTicks = 0;
-            FlightRecorder.routine("CHEST_STEP_START block=" + aheadId + " top=" + fmt(chestClimbTop)
+            routeNote(p, "CLIMB_START");
+            FlightRecorder.routine("CHEST_STEP_START block=" + probeBlock + " top=" + f2(chestClimbTop)
                     + " pos=" + local(p.getX(), p.getY(), p.getZ()));
             return continueChestClimb(c, p);
         }
 
-        // Only validate the next ~1.2 blocks, not the entire route to a distant goal.
-        // A long-range check used to classify a later drop as an immediate blocker and
-        // send the player circling around the target. The local check catches hazards
-        // before the player's body reaches them while preserving the known ship route.
-        if (!allowDrop && !chestStep && !pathSafeAhead(c, p, ux, uz, Math.min(1.2, dist))) {
+        // Void / drop protection for the next ~1.2 blocks. It also runs while standing ON the chest.
+        if (!allowDrop && !pathSafeAhead(c, p, ux, uz, Math.min(1.2, dist))) {
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
             FlightRecorder.routine("WALK_UNSAFE_AHEAD pos=" + local(p.getX(), p.getY(), p.getZ())
-                    + " blockAhead=" + aheadId + " distance=" + fmt(dist));
+                    + " target=" + local(tx, p.getY(), tz) + " distance=" + fmt(dist));
+            diag(c, p, "WALK_UNSAFE_AHEAD");
             return W_UNSAFE;
         }
 
-        if (press && bodyBlocked && raisedBlocked && !chestJumpClear) {
+        if (kind == P_WALL) {
             c.options.forwardKey.setPressed(false);
             c.options.jumpKey.setPressed(false);
             FlightRecorder.routine("WALK_BLOCKED pos=" + local(p.getX(), p.getY(), p.getZ())
                     + " target=" + local(tx, p.getY(), tz) + " distance=" + fmt(dist)
-                    + " blockAhead=" + aheadId + " raisedFree=false chestClear=" + chestJumpClear);
+                    + " blocker=" + probeBlock + " needs_raise=" + f2(probeNeed));
+            diag(c, p, "WALK_BLOCKED");
             return W_UNSAFE;
         }
 
         c.options.forwardKey.setPressed(press);
-        boolean normalStepJump = bodyBlocked && !raisedBlocked;
-        c.options.jumpKey.setPressed(press && p.isOnGround() && dist > 0.42 && normalStepJump);
+        // A step up to 0.6 is climbed by the game itself (no jump). Only a real 1-block step needs a jump.
+        c.options.jumpKey.setPressed(press && kind == P_JUMP && p.isOnGround() && dist > 0.42);
 
         if (dist < walkBest - 0.04) {
             walkBest = dist;
@@ -1653,9 +1715,93 @@ public final class FlightShipRoutine {
         if (stuckTicks > 80) {
             FlightRecorder.routine("WALK_STUCK pos=" + local(p.getX(), p.getY(), p.getZ())
                     + " target=" + local(tx, p.getY(), tz) + " distance=" + fmt(dist));
+            diag(c, p, "WALK_STUCK");
             return W_STUCK;
         }
         return W_MOVING;
+    }
+
+    /**
+     * Looks at the space the player's body will occupy 0.25 / 0.5 / 0.75 blocks ahead (never beyond reach).
+     * P_CLEAR = free, P_STEP = a ledge of up to 0.6 that the game climbs by itself, P_JUMP = a step of up to 1.25
+     * that needs one jump (and has room above it), P_WALL = anything else. Details are left in probeBlock/probePos.
+     */
+    private static int probeAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz, double reach) {
+        int worst = P_CLEAR;
+        double wNeed = 0.0, wTop = 0.0;
+        String wBlock = "";
+        BlockPos wPos = null;
+        Box body = p.getBoundingBox();
+        for (double d = 0.25; ; d += 0.25) {
+            double use = Math.min(d, reach);
+            int k = probeAt(c, p, body, ux * use, uz * use);
+            if (k > worst || (k == worst && k != P_CLEAR && probeNeed > wNeed)) {
+                worst = k;
+                wNeed = probeNeed;
+                wTop = probeTop;
+                wBlock = probeBlock;
+                wPos = probePos;
+            }
+            if (d >= reach) break;
+        }
+        probeNeed = wNeed;
+        probeTop = wTop;
+        probeBlock = wBlock;
+        probePos = wPos;
+        return worst;
+    }
+
+    private static int probeAt(MinecraftClient c, ClientPlayerEntity p, Box body, double ox, double oz) {
+        probeNeed = 0.0;
+        probeTop = 0.0;
+        probeBlock = "";
+        probePos = null;
+        // 0.02 above the feet: the floor the player stands on does not count as an obstacle
+        double top = topCollision(c, body.offset(ox, 0.02, oz));
+        if (Double.isNaN(top)) return P_CLEAR;
+        BlockPos pos = probePos;
+        String id = probeBlock;
+        double need = top - p.getY();
+        double raise = need + 0.03;
+        boolean liftedFree = need <= JUMP_HEIGHT && Double.isNaN(topCollision(c, body.offset(ox, raise, oz)));
+        probePos = pos;
+        probeBlock = id;
+        probeTop = top;
+        probeNeed = need;
+        if (!liftedFree) return P_WALL;
+        return need <= STEP_HEIGHT ? P_STEP : P_JUMP;
+    }
+
+    /** Highest collision surface that overlaps the box (world Y), NaN when nothing overlaps. Fills probePos / probeBlock. */
+    private static double topCollision(MinecraftClient c, Box box) {
+        double best = Double.NaN;
+        probePos = null;
+        probeBlock = "";
+        int x0 = MathHelper.floor(box.minX), x1 = MathHelper.floor(box.maxX);
+        int y0 = MathHelper.floor(box.minY), y1 = MathHelper.floor(box.maxY);
+        int z0 = MathHelper.floor(box.minZ), z1 = MathHelper.floor(box.maxZ);
+        BlockPos.Mutable pos = new BlockPos.Mutable();
+        for (int x = x0; x <= x1; x++) {
+            for (int y = y0; y <= y1; y++) {
+                for (int z = z0; z <= z1; z++) {
+                    pos.set(x, y, z);
+                    BlockState st = c.world.getBlockState(pos);
+                    if (st.isAir()) continue;
+                    var shape = st.getCollisionShape(c.world, pos);
+                    if (shape.isEmpty()) continue;
+                    for (Box part : shape.getBoundingBoxes()) {
+                        Box w = part.offset(x, y, z);
+                        if (!w.intersects(box)) continue;
+                        if (Double.isNaN(best) || w.maxY > best) {
+                            best = w.maxY;
+                            probePos = pos.toImmutable();
+                            probeBlock = Registries.BLOCK.getId(st.getBlock()) + "@" + x + "," + y + "," + z;
+                        }
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     /**
@@ -1693,7 +1839,9 @@ public final class FlightShipRoutine {
                 walkBest = 1e9;
                 stuckTicks = 0;
                 FlightRecorder.routine("CHEST_STEP_LANDED pos=" + local(p.getX(), p.getY(), p.getZ())
-                        + " chestTop=" + fmt(chestClimbTop) + " ticks=" + landedTicks);
+                        + " chestTop=" + f2(chestClimbTop) + " ticks=" + landedTicks
+                        + " loc=" + locName(locate(c, p)));
+                routeNote(p, "CHEST_LANDED");
                 return W_MOVING;
             }
 
@@ -1702,7 +1850,10 @@ public final class FlightShipRoutine {
             if (!chestClimbJumpIssued) {
                 c.options.forwardKey.setPressed(aligned && dist > 0.42);
                 c.options.jumpKey.setPressed(aligned);
-                if (aligned) chestClimbJumpIssued = true;
+                if (aligned) {
+                    chestClimbJumpIssued = true;
+                    routeNote(p, "CLIMB_JUMP");
+                }
             } else {
                 c.options.forwardKey.setPressed(false);
                 c.options.jumpKey.setPressed(false);
@@ -1713,6 +1864,7 @@ public final class FlightShipRoutine {
                     chestClimbJumpIssued = false;
                     FlightRecorder.routine("CHEST_STEP_FAILED reason=jump_did_not_start ticks=" + chestClimbTicks
                             + " pos=" + local(p.getX(), p.getY(), p.getZ()));
+                    diag(c, p, "CHEST_JUMP_NOT_STARTED");
                     return W_STUCK;
                 }
             }
@@ -1729,6 +1881,7 @@ public final class FlightShipRoutine {
             chestClimbJumpIssued = false;
             FlightRecorder.routine("CHEST_STEP_FAILED reason=jump_timed_out ticks=" + chestClimbTicks
                     + " pos=" + local(p.getX(), p.getY(), p.getZ()));
+            diag(c, p, "CHEST_JUMP_TIMED_OUT");
             return W_STUCK;
         }
         return W_MOVING;
@@ -1750,60 +1903,180 @@ public final class FlightShipRoutine {
         return true;
     }
 
-    /** True when the unraised body hits something but the same body raised by one block is clear. */
-    private static boolean walkWallAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz) {
-        return walkBodyAhead(c, p, ux, uz, 0.0) && walkBodyAhead(c, p, ux, uz, 1.0);
+    /** Highest collision surface at ONE point (x, z) at or below startY, searching maxDown blocks down. NaN when none. */
+    private static double surfaceAt(MinecraftClient c, double sx, double sz, double startY, int maxDown) {
+        int y0 = MathHelper.floor(startY);
+        int bx = MathHelper.floor(sx), bz = MathHelper.floor(sz);
+        double localX = sx - bx, localZ = sz - bz;
+        for (int y = y0; y >= y0 - maxDown; y--) {
+            BlockPos pos = new BlockPos(bx, y, bz);
+            var shape = c.world.getBlockState(pos).getCollisionShape(c.world, pos);
+            if (shape.isEmpty()) continue;
+            double best = Double.NaN;
+            for (Box part : shape.getBoundingBoxes()) {
+                if (localX + 1.0E-4 < part.minX || localX - 1.0E-4 > part.maxX
+                        || localZ + 1.0E-4 < part.minZ || localZ - 1.0E-4 > part.maxZ) continue;
+                double top = y + part.maxY;
+                if (Double.isNaN(best) || top > best) best = top;
+            }
+            if (!Double.isNaN(best)) return best;
+        }
+        return Double.NaN;
     }
 
-    private static boolean walkBodyAhead(MinecraftClient c, ClientPlayerEntity p, double ux, double uz, double raise) {
-        Box body = p.getBoundingBox();
-        for (double distance : new double[]{0.25, 0.50, 0.75}) {
-            Box future = body.offset(ux * distance, raise, uz * distance);
-            if (c.world.getBlockCollisions(p, future).iterator().hasNext()) return true;
+    /**
+     * Support under the player. The CENTRE must stand over a real collision surface (never accepted otherwise),
+     * and at least 2 of 4 sample points 0.25 away from the centre must have support too. The old test used
+     * points exactly 0.3 away (the very edge of the 0.6 wide box) and needed all of them: on the one-block tunnel
+     * floor one of them always fell on the neighbouring block's edge and the player was called "unsupported".
+     */
+    private static double groundTop(MinecraftClient c, double x, double startY, double z, int maxDown) {
+        double centerTop = surfaceAt(c, x, z, startY, maxDown);
+        if (Double.isNaN(centerTop)) return Double.NaN;
+        int supported = 0;
+        for (int k = 0; k < 4; k++) {
+            double sx = x + (k == 0 ? SUPPORT_INSET : k == 1 ? -SUPPORT_INSET : 0.0);
+            double sz = z + (k == 2 ? SUPPORT_INSET : k == 3 ? -SUPPORT_INSET : 0.0);
+            double t = surfaceAt(c, sx, sz, startY, maxDown);
+            if (!Double.isNaN(t) && centerTop - t <= MAX_WALK_DROP) supported++;
+        }
+        return supported >= 2 ? centerTop : Double.NaN;
+    }
+
+    // ------------------------------------------------------------------ ship route: where is the player?
+
+    private static final int L_AIR = 0, L_LEDGE = 1, L_CHEST = 2, L_TUNNEL = 3, L_UNKNOWN = 4;
+    private static String routePhase = "";
+
+    private static String locName(int loc) {
+        return switch (loc) {
+            case L_AIR -> "AIR";
+            case L_LEDGE -> "LEDGE";
+            case L_CHEST -> "CHEST_TOP";
+            case L_TUNNEL -> "TUNNEL_FLOOR";
+            default -> "UNKNOWN";
+        };
+    }
+
+    /** True when the player is really supported by this block's collision top (the block under the feet). */
+    private static boolean standingOn(MinecraftClient c, ClientPlayerEntity p, BlockPos pos) {
+        if (!p.isOnGround()) return false;
+        var shape = c.world.getBlockState(pos).getCollisionShape(c.world, pos);
+        if (shape.isEmpty()) return false;
+        Box feet = p.getBoundingBox().offset(0, -0.03, 0);
+        for (Box part : shape.getBoundingBoxes()) {
+            Box w = part.offset(pos.getX(), pos.getY(), pos.getZ());
+            if (w.intersects(feet) && Math.abs(w.maxY - p.getY()) < 0.06) return true;
         }
         return false;
     }
 
-    /** Approximate block at the leading edge, for an actionable wall diagnostic. */
-    private static BlockPos walkBlockAhead(ClientPlayerEntity p, double ux, double uz) {
-        return new BlockPos(MathHelper.floor(p.getX() + ux * 0.65),
-                MathHelper.floor(p.getY() + 0.05), MathHelper.floor(p.getZ() + uz * 0.65));
+    /** Ledge in front of the frame, chest top, or tunnel floor: decided from the real supporting block. */
+    private static int locate(MinecraftClient c, ClientPlayerEntity p) {
+        if (!p.isOnGround()) return L_AIR;
+        double a = localA(p.getX(), p.getZ()), left = localLeft(p.getX(), p.getZ()), h = p.getY() - fy;
+        boolean onChest = standingOn(c, p, blockAt(CHEST_BLOCK));
+        boolean onFloor = standingOn(c, p, blockAt(EXIT_FLOOR));
+        if (onChest && onFloor) return a >= 0.0 ? L_CHEST : L_TUNNEL;
+        if (onChest) return L_CHEST;
+        if (onFloor) return L_TUNNEL;
+        if (Math.abs(h + 1.5) < 0.3 && a > -0.3 && a < 2.4 && left > -1.7 && left < 0.7) return L_LEDGE;
+        return L_UNKNOWN;
     }
 
-    /**
-     * Highest collision surface below the player's centre, while also requiring each
-     * corner sample to have nearby support. This avoids both chest-height errors and
-     * falsely treating one supported corner as a fully supported walking surface.
-     */
-    private static double groundTop(MinecraftClient c, double x, double startY, double z, int maxDown) {
-        double centerTop = Double.NaN;
-        double lowestSupport = Double.POSITIVE_INFINITY;
-        int y0 = MathHelper.floor(startY);
-        for (int k = 0; k < 5; k++) {
-            double sx = x + (k == 1 ? 0.3 : k == 2 ? -0.3 : 0.0);
-            double sz = z + (k == 3 ? 0.3 : k == 4 ? -0.3 : 0.0);
-            int bx = MathHelper.floor(sx), bz = MathHelper.floor(sz);
-            double localX = sx - bx, localZ = sz - bz;
-            double sampleTop = Double.NaN;
-            for (int y = y0; y >= y0 - maxDown; y--) {
-                BlockPos pos = new BlockPos(bx, y, bz);
-                BlockState state = c.world.getBlockState(pos);
-                var shape = state.getCollisionShape(c.world, pos);
-                if (shape.isEmpty()) continue;
-                for (Box part : shape.getBoundingBoxes()) {
-                    if (localX + 1.0E-4 < part.minX || localX - 1.0E-4 > part.maxX
-                            || localZ + 1.0E-4 < part.minZ || localZ - 1.0E-4 > part.maxZ) continue;
-                    double top = y + part.maxY;
-                    if (Double.isNaN(sampleTop) || top > sampleTop) sampleTop = top;
-                }
-                if (!Double.isNaN(sampleTop)) break;
-            }
-            if (Double.isNaN(sampleTop)) return Double.NaN;
-            if (k == 0) centerTop = sampleTop;
-            lowestSupport = Math.min(lowestSupport, sampleTop);
+    private static void routeNote(ClientPlayerEntity p, String phase) {
+        if (phase.equals(routePhase)) return;
+        routePhase = phase;
+        FlightRecorder.routine("ROUTE " + phase + " step=" + STEPS[Math.min(stepIndex, STEPS.length - 1)]
+                + " sub=" + sub + " pos=" + local(p.getX(), p.getY(), p.getZ()));
+    }
+
+    private static void routeBegin(MinecraftClient c, ClientPlayerEntity p) {
+        routePhase = "";
+        routeNote(p, "BEGIN_" + locName(locate(c, p)));
+        dumpGeometry(c);
+        diag(c, p, "ROUTE_BEGIN");
+    }
+
+    private static String tunnelProblem(MinecraftClient c) {
+        for (double[] g : new double[][]{EXIT_UP, EXIT_LOW}) {
+            BlockPos bp = blockAt(g);
+            if (solid(c, bp)) return "an exit block is still there: " + blockId(c, bp) + " at " + blockLocal(bp);
         }
-        if (Double.isNaN(centerTop) || centerTop - lowestSupport > MAX_WALK_DROP) return Double.NaN;
-        return centerTop;
+        if (!solid(c, blockAt(EXIT_FLOOR))) return "the tunnel has no floor block";
+        return null;
+    }
+
+    private static String chestProblem(MinecraftClient c) {
+        BlockPos bp = blockAt(CHEST_BLOCK);
+        String id = blockId(c, bp);
+        double top = collisionTop(c.world.getBlockState(bp), c, bp);
+        if (!id.contains("chest") || top < 0.5 || top > 1.1) {
+            return "expected a chest at " + blockLocal(bp) + " but found " + id + " (collision height " + f2(top) + ")";
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------ diagnostics
+
+    private static String f2(double v) {
+        return Double.isNaN(v) ? "none" : String.format(Locale.ROOT, "%.2f", v);
+    }
+
+    private static String supportText(MinecraftClient c, ClientPlayerEntity p) {
+        double y = p.getY() - 0.01;
+        return "c=" + f2(surfaceAt(c, p.getX(), p.getZ(), y, 3))
+                + " +x=" + f2(surfaceAt(c, p.getX() + SUPPORT_INSET, p.getZ(), y, 3))
+                + " -x=" + f2(surfaceAt(c, p.getX() - SUPPORT_INSET, p.getZ(), y, 3))
+                + " +z=" + f2(surfaceAt(c, p.getX(), p.getZ() + SUPPORT_INSET, y, 3))
+                + " -z=" + f2(surfaceAt(c, p.getX(), p.getZ() - SUPPORT_INSET, y, 3));
+    }
+
+    /** Player box, local position, support samples and the blocks around the feet (id, local position, collision top). */
+    private static void diag(MinecraftClient c, ClientPlayerEntity p, String tag) {
+        if (c == null || c.world == null || p == null || frame == null) return;
+        Box b = p.getBoundingBox();
+        FlightRecorder.routine("DIAG " + tag + " pos=" + local(p.getX(), p.getY(), p.getZ())
+                + " world=" + f2(p.getX()) + "," + f2(p.getY()) + "," + f2(p.getZ())
+                + " gnd=" + p.isOnGround() + " loc=" + locName(locate(c, p))
+                + " box=" + f2(b.minX) + "," + f2(b.minY) + "," + f2(b.minZ) + ".." + f2(b.maxX) + "," + f2(b.maxY) + "," + f2(b.maxZ)
+                + " support[" + supportText(c, p) + "]");
+        StringBuilder sb = new StringBuilder("DIAG_BLOCKS");
+        int bx = MathHelper.floor(p.getX()), by = MathHelper.floor(p.getY()), bz = MathHelper.floor(p.getZ());
+        int n = 0;
+        for (int dy = -1; dy <= 2 && n < 16; dy++) {
+            for (int dx = -1; dx <= 1 && n < 16; dx++) {
+                for (int dz = -1; dz <= 1 && n < 16; dz++) {
+                    BlockPos pos = new BlockPos(bx + dx, by + dy, bz + dz);
+                    BlockState st = c.world.getBlockState(pos);
+                    if (st.isAir()) continue;
+                    var shape = st.getCollisionShape(c.world, pos);
+                    sb.append(' ').append(blockId(c, pos).replace("minecraft:", "")).append('@')
+                            .append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ())
+                            .append("[").append(blockLocal(pos)).append("]top=")
+                            .append(shape.isEmpty() ? "none" : f2(pos.getY() + shape.getMax(Direction.Axis.Y)));
+                    n++;
+                }
+            }
+        }
+        FlightRecorder.routine(sb.toString());
+    }
+
+    /** The blocks the exit route depends on, with real ids and collision tops (the MAP in the log has no ids). */
+    private static void dumpGeometry(MinecraftClient c) {
+        String[] names = {"CHEST", "WALL_BESIDE_CHEST_LOW", "WALL_BESIDE_CHEST_UP", "EXIT_FLOOR", "EXIT_LOW", "EXIT_UP",
+                "TUNNEL_CEILING", "OUTSIDE_LOW", "OUTSIDE_UP", "TUNNEL_SIDE_LOW"};
+        double[][] gs = {CHEST_BLOCK, {0.5, 2.0, -0.5}, {0.5, 2.0, 0.5}, EXIT_FLOOR, EXIT_LOW, EXIT_UP,
+                {-0.5, 1.0, 1.5}, {-1.5, 1.0, -0.5}, {-1.5, 1.0, 0.5}, {-0.5, 2.0, -0.5}};
+        StringBuilder sb = new StringBuilder("GEOMETRY");
+        for (int i = 0; i < names.length; i++) {
+            BlockPos bp = blockAt(gs[i]);
+            BlockState st = c.world.getBlockState(bp);
+            sb.append(' ').append(names[i]).append('=').append(blockId(c, bp).replace("minecraft:", ""))
+                    .append('@').append(bp.getX()).append(',').append(bp.getY()).append(',').append(bp.getZ())
+                    .append("top=").append(st.isAir() ? "air" : f2(bp.getY() + collisionTop(st, c, bp)));
+        }
+        FlightRecorder.routine(sb.toString());
     }
 
     /** Highest vertical collision surface for a block (0..1); used for chest step height. */
