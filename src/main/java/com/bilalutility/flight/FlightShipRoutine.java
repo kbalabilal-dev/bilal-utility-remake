@@ -113,6 +113,10 @@ public final class FlightShipRoutine {
     // A shulker is handled only when it is inside the ship, close to the frame, and can see the player.
     private static ShulkerEntity frameThreat;
     private static int frameThreatAttackCd;
+    // v2.0.8: shulker that sits in/next to the way out (DIG_EXIT) and blocks the jump or the digging
+    private static ShulkerEntity exitShulker;
+    private static int exitShulkerCd, exitShulkerTicks;
+    private static boolean exitShulkerGiveUp;
     private static double fx, fy, fz;
     private static double frameApproachA;
     private static int fdx, fdz, ldx, ldz;
@@ -406,6 +410,10 @@ public final class FlightShipRoutine {
         bullet = null;
         bulletCd = 0;
         defendTicks = 0;
+        exitShulker = null;
+        exitShulkerCd = 0;
+        exitShulkerTicks = 0;
+        exitShulkerGiveUp = false;
         mineReset();
         scanActive = false;
         go(0);
@@ -778,6 +786,11 @@ public final class FlightShipRoutine {
         }
         boolean lev = p.hasStatusEffect(StatusEffects.LEVITATION);
         boolean acting = s != Step.TAKEOFF && !(s == Step.PEARL_OUT && sub >= 4);
+        if (s == Step.DIG_EXIT && (p.isOnGround() || lev) && fightExitShulker(c, p)) {
+            stepTicks++;
+            if (stepTicks > s.timeout) abort(c, "timeout in step " + s);
+            return;
+        }
         if (acting && (p.isOnGround() || lev) && defend(c, p, lev)) {
             stepTicks++;                                  // defending also counts for the step timeout
             if (stepTicks > s.timeout) abort(c, "timeout in step " + s);
@@ -1492,6 +1505,72 @@ public final class FlightShipRoutine {
     }
 
     // ------------------------------------------------------------------ shulker bullets
+
+    /**
+     * v2.0.8: a shulker that teleported next to / into the way out (above the chest, in the exit tunnel) blocks the
+     * jump onto the chest and keeps shooting. This kills it with the sword (or the pickaxe) while it is in reach (3 blocks).
+     * It never chases: a shulker out of reach is left alone. Returns true while it is busy fighting.
+     */
+    private static boolean fightExitShulker(MinecraftClient c, ClientPlayerEntity p) {
+        if (exitShulkerGiveUp) return false;
+        if (exitShulkerCd > 0) exitShulkerCd--;
+        if (exitShulker != null && (exitShulker.isRemoved() || !exitShulker.isAlive())) {
+            FlightRecorder.routine("EXIT_SHULKER_KILLED ticks=" + exitShulkerTicks);
+            exitShulker = null;
+            exitShulkerTicks = 0;
+            defendTicks = 0;                       // the bullet budget starts again once the source is dead
+            int pick = pickaxeSlot(p);
+            if (pick >= 0) p.getInventory().setSelectedSlot(pick);
+            return false;
+        }
+        double ex = p.getX(), ey = p.getEyeY(), ez = p.getZ();
+        if (exitShulker == null) {
+            double best = 3.0 * 3.0;
+            Box box = new Box(ex - 3.5, ey - 3.5, ez - 3.5, ex + 3.5, ey + 3.5, ez + 3.5);
+            for (ShulkerEntity sh : c.world.getEntitiesByClass(ShulkerEntity.class, box, e -> !e.isRemoved() && e.isAlive())) {
+                double d = sq(sh.getX() - ex) + sq(sh.getY() + 0.5 - ey) + sq(sh.getZ() - ez);
+                if (d < best) {
+                    best = d;
+                    exitShulker = sh;
+                }
+            }
+            if (exitShulker == null) return false;
+            FlightRecorder.routine("EXIT_SHULKER_FOUND pos=" + local(exitShulker.getX(), exitShulker.getY(), exitShulker.getZ())
+                    + " dist=" + fmt(Math.sqrt(best)));
+        }
+        double dist = Math.sqrt(sq(exitShulker.getX() - ex) + sq(exitShulker.getY() + 0.5 - ey) + sq(exitShulker.getZ() - ez));
+        if (dist > 3.6) {                           // it moved away: stop, do not chase it
+            FlightRecorder.routine("EXIT_SHULKER_OUT_OF_REACH dist=" + fmt(dist));
+            exitShulker = null;
+            return false;
+        }
+        if (++exitShulkerTicks > 200) {
+            FlightRecorder.routine("EXIT_SHULKER_GIVE_UP could not hit it in 200 ticks");
+            exitShulkerGiveUp = true;
+            exitShulker = null;
+            int pick = pickaxeSlot(p);
+            if (pick >= 0) p.getInventory().setSelectedSlot(pick);
+            return false;
+        }
+        releaseKeys(c);
+        if (!isSword(p.getMainHandStack())) {
+            int weapon = swordSlot(p);
+            if (weapon < 0) weapon = pickaxeSlot(p);
+            if (weapon >= 0) p.getInventory().setSelectedSlot(weapon);
+        }
+        Vec3d aim = new Vec3d(exitShulker.getX(), exitShulker.getY() + 0.5, exitShulker.getZ());
+        double err = look(p, aim);
+        say(c, "Shulker blocks the way out! Attacking it");
+        boolean on = c.crosshairTarget instanceof EntityHitResult eh && eh.getEntity() == exitShulker;
+        if (dist <= 3.0 && err < 4.0 && on && exitShulkerCd == 0) {
+            c.interactionManager.attackEntity(p, exitShulker);
+            p.swingHand(Hand.MAIN_HAND);
+            exitShulkerCd = 10 + RND.nextInt(5);
+            FlightRecorder.routine("EXIT_SHULKER_HIT dist=" + fmt(dist) + " hp=" + fmt(exitShulker.getHealth())
+                    + " held=" + Registries.ITEM.getId(p.getMainHandStack().getItem()));
+        }
+        return true;
+    }
 
     /**
      * A shulker bullet that flies at you gives levitation (and about 4 damage). A bullet dies from one hit,

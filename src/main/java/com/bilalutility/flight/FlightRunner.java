@@ -1097,7 +1097,8 @@ public final class FlightRunner {
             if (goAroundTicks > 0 && !shipDropActive) {
                 double heading = Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
                 turnYaw(p, heading + (shipApproaches % 2 == 0 ? -115 : 115), 3.5f);
-                p.setPitch(0f);
+                // too high: dive gently while flying the wide arc, so every go-around loses height (v2.0.8)
+                p.setPitch(height > 14 ? (float) Math.min(22.0, height * 0.35) : 0f);
                 goAroundTicks--;
                 landDecision(client, dist, height, horizontalSpeed, 0f, "go-around arc " + shipApproaches + "/3");
                 return;
@@ -1497,9 +1498,21 @@ public final class FlightRunner {
     }
 
     /** Retry a ship landing without marking the destination complete. Three failed attempts pause the queue. */
+    private static String tname() {
+        return target != null ? target.name : "the ground";
+    }
+
     private static void retryLanding(MinecraftClient client, String reason) {
         if (shipLanding) {
             pauseUnsafeShipTouchdown(client, reason);
+            return;
+        }
+        if (target == null) {
+            // emergency landing (no destination): never pause or crash, just make another approach to the ground
+            landingAttempts = 0;
+            emergency = true;
+            state = State.CRUISE;
+            debug(client, "Emergency landing approach failed (" + reason + "): trying again");
             return;
         }
         landingAttempts++;
@@ -1508,7 +1521,7 @@ public final class FlightRunner {
             client.options.jumpKey.setPressed(false);
             client.options.forwardKey.setPressed(false);
             debug(client, "Landing attempt 3 failed: " + reason + ". Queue paused; destination remains active.");
-            msg(client, "Auto Elytra: could not land on " + target.name + " after 3 tries (" + reason + "). Queue paused. Press Start to retry.");
+            msg(client, "Auto Elytra: could not land on " + tname() + " after 3 tries (" + reason + "). Queue paused. Press Start to retry.");
             return;
         }
         debug(client, "Landing attempt " + landingAttempts + "/3 failed: " + reason + ". Taking off for another approach.");
