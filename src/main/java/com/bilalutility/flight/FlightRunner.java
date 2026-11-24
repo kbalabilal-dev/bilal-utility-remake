@@ -101,6 +101,10 @@ public final class FlightRunner {
     // ship detection / landing state of the current leg
     private static boolean shipLanding;
     private static int verdictStreak, recoveryRockets;
+    // A ship candidate was seen at this point: never land on the point itself until it is confirmed
+    private static boolean shipCandidateSeen;
+    private static int shipApproachTicks;
+    private static final int SHIP_CONFIRM_TIMEOUT = 1400;   // about 70 seconds of approaching without an answer
     private static String lastVerdictSeen = "";
     private static double lastVerdictCenterX = Double.NaN, lastVerdictCenterZ = Double.NaN;
     private static String lastScanNote = "";
@@ -449,6 +453,8 @@ public final class FlightRunner {
         orbiting = false;
         spotSet = false;
         shipLanding = false;
+        shipCandidateSeen = false;
+        shipApproachTicks = 0;
         verdictStreak = 0;
         lastVerdictSeen = "";
         lastVerdictCenterX = Double.NaN;
@@ -523,8 +529,54 @@ public final class FlightRunner {
             case TAKEOFF -> takeoff(client);
             case CRUISE, LAND -> fly(client);
             case PAUSE -> pause(client);
+            case PAUSED_FAILURE -> pausedFailure(client);
             default -> { }
         }
+    }
+
+    // ------------------------------------------------------------------ AFK recovery
+
+    private static int pausedTicks, afkRecoveries;
+    private static FlightConfig.Waypoint afkTarget;
+    private static final int AFK_MAX_RECOVERIES = 2;
+
+    /**
+     * Full Auto (AFK): a failed landing or a blocked takeoff must not wait for the player. After a short pause
+     * (10 ticks in the air, 60 on the ground) it tries the point again, at most AFK_MAX_RECOVERIES times.
+     * Then it skips the point (marked "failed") and flies on to the next one; a different direction also
+     * clears most "takeoff blocked by a wall" cases. In assisted mode it still waits for the Start key.
+     */
+    private static void pausedFailure(MinecraftClient client) {
+        ClientPlayerEntity p = client.player;
+        if (FlightConfig.routineMode != 2 || p == null) {
+            pausedTicks = 0;
+            return;
+        }
+        pausedTicks++;
+        if (pausedTicks < (p.isOnGround() ? 60 : 10)) return;
+        pausedTicks = 0;
+        if (target == null) {
+            beginTakeoff();
+            return;
+        }
+        if (afkTarget != target) {
+            afkTarget = target;
+            afkRecoveries = 0;
+        }
+        if (afkRecoveries < AFK_MAX_RECOVERIES) {
+            afkRecoveries++;
+            landingAttempts = 0;
+            landFails = 0;
+            debug(client, "AFK_RECOVER: trying " + target.name + " again (" + afkRecoveries + "/" + AFK_MAX_RECOVERIES + ")");
+            msg(client, "Auto Elytra: trying " + target.name + " again by itself (" + afkRecoveries + "/" + AFK_MAX_RECOVERIES + ")");
+            beginTakeoff();
+            return;
+        }
+        String name = target.name;
+        afkRecoveries = 0;
+        debug(client, "AFK_RECOVER: giving up on " + name + " after " + AFK_MAX_RECOVERIES + " tries, flying to the next point");
+        skipPoint(client, "failed", "could not be landed or left after " + AFK_MAX_RECOVERIES + " tries");
+        if (state == State.PAUSED_FAILURE && target != null) beginTakeoff();
     }
 
     // ------------------------------------------------------------------ prepare
@@ -537,10 +589,19 @@ public final class FlightRunner {
             return;
         }
         if (hotbarSlot(p, Items.FIREWORK_ROCKET) < 0) {
+            // rockets in the inventory: move them to the hotbar by itself and wait for it
+            if (countRockets(p) > 0 && ticks <= 40) {
+                if (ticks % 10 == 1) refillRockets(client);
+                return;
+            }
             stop(client, "Auto Elytra: put firework rockets in your hotbar");
             return;
         }
         if (FlightConfig.pearlRescue && hotbarSlot(p, Items.ENDER_PEARL) < 0) {
+            if (ticks <= 40) {
+                if (ticks % 10 == 1) refillItem(client, Items.ENDER_PEARL);
+                return;
+            }
             stop(client, "Auto Elytra: put an ender pearl in your hotbar (or turn pearl rescue off)");
             return;
         }
@@ -848,6 +909,20 @@ public final class FlightRunner {
                             debug(client, "Air scan: shulkers=" + scan.shulkers.size() + ", verdict=" + scan.verdict
                                     + " x" + verdictStreak + ", " + lastScanNote + ", frames=" + lastFrameCount
                                     + ", shipDist=" + fmt(shipDist));
+                            // Two or more shulkers with a matching back pair: a ship is there, but the verdict is
+                            // not final yet (shulkers far away may not be loaded, so "looted" can be wrong).
+                            // Do NOT land on the point. Fly to the ship so everything around it loads,
+                            // then wait for 8 stable "untouched" scans (land) or 24 stable "looted" scans (skip).
+                            if (scan.shulkers.size() >= 2 && !scan.verdict.equals("unknown")
+                                    && scan.centerX != 0 && scan.centerZ != 0) {
+                                if (!shipCandidateSeen) {
+                                    debug(client, "Ship candidate seen: flying to it to confirm before landing");
+                                }
+                                shipCandidateSeen = true;
+                                spotX = scan.centerX;
+                                spotZ = scan.centerZ;
+                                spotSet = true;
+                            }
                             // Positive untouched evidence still uses the existing quick confirmation.
                             // A looted verdict is much riskier: wait 24 stable scans (about 6 seconds),
                             // with the player close to the ship and its chunk fully loaded, to avoid
@@ -855,7 +930,7 @@ public final class FlightRunner {
                             if (scan.verdict.equals("untouched") && verdictStreak >= 8) {
                                 setShipLanding(client, scan.centerX, scan.centerY, scan.centerZ, "third shulker in place");
                             } else if (scan.verdict.equals("looted") && verdictStreak >= 24
-                                    && scan.shulkers.size() >= 2 && shipDist <= 64
+                                    && scan.shulkers.size() >= 2 && shipDist <= 40
                                     && chunkLoaded(client, scan.centerX, scan.centerZ)) {
                                 double fromPoint = Math.hypot(scan.centerX - (target.x + 0.5), scan.centerZ - (target.z + 0.5));
                                 if (fromPoint <= LOOTED_MAX_FROM_POINT) {
@@ -877,9 +952,18 @@ public final class FlightRunner {
                             }
                         }
                     }
+                    if (shipCandidateSeen && !scoutDone) {
+                        shipApproachTicks++;
+                        if (shipApproachTicks > SHIP_CONFIRM_TIMEOUT) {
+                            skipPoint(client, "unclear", "ship could not be confirmed after approaching it ("
+                                    + lastScanNote + "); not landing");
+                            return;
+                        }
+                    }
                     // Zero visible shulkers is UNKNOWN, never "empty". If we are over the point
                     // and there is ground, approach it and make one closer check after landing.
-                    if (!scoutDone && dist <= 12 && chunkSeen >= 30 && loaded) {
+                    // (Not when a ship candidate was seen: then only a confirmed verdict may land.)
+                    if (!scoutDone && !shipCandidateSeen && dist <= 12 && chunkSeen >= 30 && loaded) {
                         double g = groundAt(client, (int) Math.floor(tx), (int) Math.floor(tz));
                         if (g >= 0) {
                             refY = g;
@@ -1862,6 +1946,27 @@ public final class FlightRunner {
         lastRocket = ticks;
         debug(client, "Rocket fired from hotbar slot " + slot + "; remaining=" + countRockets(p));
         return true;
+    }
+
+    /** Moves a stack from the inventory into an EMPTY hotbar slot (never replaces something you put there). */
+    private static boolean refillItem(MinecraftClient client, Item item) {
+        ClientPlayerEntity p = client.player;
+        int empty = -1;
+        for (int i = 0; i < 9; i++) {
+            if (p.getInventory().getStack(i).isEmpty()) {
+                empty = i;
+                break;
+            }
+        }
+        if (empty < 0) return false;
+        PlayerScreenHandler h = p.playerScreenHandler;
+        for (int s = 9; s <= 35; s++) {
+            if (h.getSlot(s).getStack().isOf(item)) {
+                client.interactionManager.clickSlot(h.syncId, s, empty, SlotActionType.SWAP, p);
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void refillRockets(MinecraftClient client) {

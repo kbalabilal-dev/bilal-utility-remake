@@ -361,7 +361,10 @@ public final class FlightShipRoutine {
         }
         if (phase == Phase.DELAY) {
             if (--delayLeft <= 0) {
-                if (navigationRetryResume) {
+                if (afkRestart) {
+                    afkRestart = false;
+                    beginStep(c, "afk_restart");
+                } else if (navigationRetryResume) {
                     navigationRetryResume = false;
                     stepTicks = 0;
                     stepStartNow = now;
@@ -445,6 +448,8 @@ public final class FlightShipRoutine {
         navLastX = Double.NaN;
         navLastBest = 1e9;
         navigationRetryResume = false;
+        stepRestarts = 0;
+        restartIndex = -1;
         chestClimbActive = false;
         chestClimbJumpIssued = false;
         chestClimbTicks = 0;
@@ -551,6 +556,19 @@ public final class FlightShipRoutine {
         return true;
     }
 
+    private static final int MAX_STEP_RESTARTS = 2;
+    private static int stepRestarts, restartIndex = -1, healthWait;
+    private static boolean afkRestart;
+
+    /** Reasons a restart cannot fix: a deliberate stop, a missing item, or a wrong place / danger. */
+    private static boolean unrecoverable(String reason) {
+        String r = reason.toLowerCase(Locale.ROOT);
+        return r.contains("sneak") || r.contains("frame facing missing") || r.contains("not on the ship roof")
+                || r.contains("falling") || r.contains("below the ship") || r.contains("flight did not start")
+                || r.contains("flight is already running") || r.contains("no pickaxe") || r.contains("no ender pearl")
+                || r.contains("no sword") || r.contains("no safe ground for the pearl");
+    }
+
     private static void abort(MinecraftClient c, String reason) {
         releaseKeys(c);
         abortReason = reason;
@@ -562,6 +580,24 @@ public final class FlightShipRoutine {
         FlightRecorder.routine("STEP_END step=" + s + " start=" + stepStartClock + " end=" + FlightRecorder.clock()
                 + " result=ABORT reason=" + reason.replace(' ', '_')
                 + (p != null && frame != null ? " pos=" + local(p.getX(), p.getY(), p.getZ()) : ""));
+        // Full Auto (AFK): restart the same step by itself, at most twice, before giving up for good
+        if (FlightConfig.routineMode == 2 && p != null && !unrecoverable(reason)) {
+            if (restartIndex != stepIndex) {
+                restartIndex = stepIndex;
+                stepRestarts = 0;
+            }
+            if (stepRestarts < MAX_STEP_RESTARTS) {
+                stepRestarts++;
+                FlightRecorder.routine("AFK_RESTART step=" + s + " attempt=" + stepRestarts + "/" + MAX_STEP_RESTARTS
+                        + " reason=" + reason.replace(' ', '_'));
+                p.sendMessage(Text.literal("Ship routine: " + reason + " - restarting this step by itself ("
+                        + stepRestarts + "/" + MAX_STEP_RESTARTS + ")"), false);
+                afkRestart = true;
+                phase = Phase.DELAY;
+                delayLeft = 60;
+                return;
+            }
+        }
         phase = Phase.ABORTED;
         alertLeft = 100;
         if (p != null) {
@@ -730,7 +766,13 @@ public final class FlightShipRoutine {
             return;
         }
         boolean flightHandOver = s == Step.PEARL_OUT && sub >= 8;      // the flight owns the keys now
+        if (p.getHealth() >= 8.0f) healthWait = 0;
         if (p.getHealth() < 8.0f && !flightHandOver && s != Step.STORE_ELYTRA) {
+            // Full Auto: stand still and let the golden apple / regeneration work (up to 60 s) instead of stopping
+            if (FlightConfig.routineMode == 2 && ++healthWait <= 1200) {
+                releaseKeys(c);
+                return;
+            }
             abort(c, "health below 8 (" + fmt(p.getHealth()) + ")");
             return;
         }
