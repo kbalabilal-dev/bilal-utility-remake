@@ -471,6 +471,8 @@ public final class FlightRunner {
 
     /** Called every rendered frame (faster than a tick): the last line of defence against the void. */
     public static void frameCheck(MinecraftClient client) {
+        // Safety watchdogs are only armed while an Elytra search queue or its ship routine is active.
+        if (state == State.IDLE && !FlightShipRoutine.isActive()) return;
         if (!FlightConfig.teamhome || client == null || client.player == null || client.world == null) return;
         if (client.world.getRegistryKey() != World.END) return;
         if (client.player.getY() >= FlightConfig.teamhomeY) return;
@@ -496,7 +498,9 @@ public final class FlightRunner {
             return;
         }
         FlightRecorder.tick(client, state.name(), state == State.IDLE);
-        if (FlightShipRoutine.tickAutoGoldenApple(client)) return;
+        // Do not eat or swap golden apples while idle; healing is scoped to active search/routine work.
+        if ((state != State.IDLE || FlightShipRoutine.isActive())
+                && FlightShipRoutine.tickAutoGoldenApple(client)) return;
         if (state == State.IDLE) return;
         ClientPlayerEntity p = client.player;
         if (p == null || client.world == null || client.world.getRegistryKey() != startDimension) {
