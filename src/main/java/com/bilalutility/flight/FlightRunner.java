@@ -703,7 +703,12 @@ public final class FlightRunner {
         resetLeg();
     }
 
+    private static int clearTicks, clearRetries;
+    private static float clearYaw;
+
     private static void beginTakeoff() {
+        clearTicks = 0;
+        clearRetries = 0;
         state = State.TAKEOFF;
         takeoffStage = 0;
         takeoffTimer = 0;
@@ -718,13 +723,15 @@ public final class FlightRunner {
             return;
         }
         ClientPlayerEntity p = client.player;
-        if (takeoffStage == 0 && p.isOnGround() && takeoffPathBlocked(client, p, target)) {
-            client.options.jumpKey.setPressed(false);
-            client.options.forwardKey.setPressed(false);
-            state = State.PAUSED_FAILURE;
-            debug(client, "Takeoff blocked by nearby solid blocks; player is not moved into the wall.");
-            msg(client, "Auto Elytra: safe takeoff blocked by a nearby wall or ceiling. Move into open space, then press Start to retry.");
-            return;
+        if (clearTicks > 0 || (takeoffStage == 0 && p.isOnGround() && takeoffPathBlocked(client, p, target))) {
+            if (clearTicks == 0 || !p.isOnGround() || takeoffPathBlocked(client, p, target)) {
+                if (clearTakeoffSpace(client, p)) return;
+            } else {
+                client.options.forwardKey.setPressed(false);
+                client.options.jumpKey.setPressed(false);
+                debug(client, "Takeoff space is free after " + clearTicks + " ticks of moving around");
+                clearTicks = 0;
+            }
         }
         if (p.isGliding()) {
             client.options.jumpKey.setPressed(false);
@@ -742,6 +749,13 @@ public final class FlightRunner {
             throwPearl(client);
         }
         if (takeoffTimer > 120) {
+            if (p.isOnGround() && ceilingAbove(client, p) && clearRetries++ < 3) {
+                debug(client, "Takeoff failed under a ceiling: moving around to find open space");
+                clearTicks = 1;
+                takeoffTimer = 0;
+                takeoffStage = 0;
+                return;
+            }
             stopOrLand(client, "Auto Elytra: could not start gliding");
             return;
         }
@@ -762,12 +776,60 @@ public final class FlightRunner {
         }
     }
 
+    /** v2.0.8: walks a little around and jumps until the wall/ceiling is gone. Returns true while it is busy. */
+    private static boolean clearTakeoffSpace(MinecraftClient client, ClientPlayerEntity p) {
+        if (++clearTicks > 400) {
+            client.options.jumpKey.setPressed(false);
+            client.options.forwardKey.setPressed(false);
+            clearTicks = 0;
+            state = State.PAUSED_FAILURE;
+            debug(client, "Takeoff blocked by nearby solid blocks; could not find open space.");
+            msg(client, "Auto Elytra: safe takeoff blocked by a nearby wall or ceiling. Move into open space, then press Start to retry.");
+            return true;
+        }
+        if (clearTicks == 1) {
+            debug(client, "Takeoff blocked by a wall or ceiling: moving around and jumping to find open space");
+            msg(client, "Auto Elytra: wall or ceiling above - moving to open space");
+        }
+        if (clearTicks % 20 == 1) {
+            float best = clearYaw;
+            boolean found = false;
+            int start = (int) (Math.random() * 8);
+            for (int i = 0; i < 8 && !found; i++) {
+                float yaw = p.getYaw() + 45f * ((start + i) % 8);
+                double ux = -Math.sin(Math.toRadians(yaw)), uz = Math.cos(Math.toRadians(yaw));
+                Box ahead = p.getBoundingBox().offset(ux * 0.8, 0, uz * 0.8);
+                boolean wall = client.world.getBlockCollisions(p, ahead).iterator().hasNext();
+                boolean floor = client.world.getBlockCollisions(p, p.getBoundingBox().offset(ux * 1.2, 0, uz * 1.2).stretch(0, -2.5, 0)).iterator().hasNext();
+                if (!wall && floor) {
+                    best = yaw;
+                    found = true;
+                }
+            }
+            clearYaw = found ? best : p.getYaw() + 90f;
+        }
+        float dyaw = MathHelper.wrapDegrees(clearYaw - p.getYaw());
+        p.setYaw(p.getYaw() + Math.max(-30f, Math.min(30f, dyaw)));
+        double ux = -Math.sin(Math.toRadians(p.getYaw())), uz = Math.cos(Math.toRadians(p.getYaw()));
+        boolean floorAhead = client.world.getBlockCollisions(p, p.getBoundingBox().offset(ux * 0.7, 0, uz * 0.7).stretch(0, -2.5, 0)).iterator().hasNext();
+        client.options.forwardKey.setPressed(floorAhead && Math.abs(dyaw) < 40f);   // never walks off an edge
+        client.options.jumpKey.setPressed(p.isOnGround() && clearTicks % 12 < 2);
+        return true;
+    }
+
+    private static boolean ceilingAbove(MinecraftClient client, ClientPlayerEntity player) {
+        Box b = player.getBoundingBox();
+        Box above = new Box(b.minX, b.maxY, b.minZ, b.maxX, b.maxY + 3.0, b.maxZ);
+        return client.world.getBlockCollisions(player, above).iterator().hasNext();
+    }
+
     /** Full-body clearance check before the first jump, especially when Start is pressed inside a ship. */
     private static boolean takeoffPathBlocked(MinecraftClient client, ClientPlayerEntity player, FlightConfig.Waypoint destination) {
         if (destination == null) return false;
         double dx = destination.x + 0.5 - player.getX();
         double dz = destination.z + 0.5 - player.getZ();
         double distance = Math.hypot(dx, dz);
+        if (ceilingAbove(client, player)) return true;
         if (distance < 0.01) return false;
         double ux = dx / distance;
         double uz = dz / distance;

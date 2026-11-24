@@ -126,6 +126,7 @@ public final class FlightShipRoutine {
     // mining
     private static int mineTicks, aimIdx, aimMiss;
     private static String mineFail = "";
+    private static int reachWalk;          // v2.0.8: ticks spent walking back to a block after a knockback
     // step data
     private static int elytraBefore, hitTries, aimOk, pearlBefore;
     private static int storageSourceSlot = -1, storageDestSlot = -1;
@@ -1679,6 +1680,7 @@ public final class FlightShipRoutine {
         aimIdx = 0;
         aimMiss = 0;
         mineFail = "";
+        reachWalk = 0;
     }
 
     /** Looks at the planned block and holds the attack key only while the crosshair is on exactly that block. */
@@ -1700,9 +1702,34 @@ public final class FlightShipRoutine {
         }
         Vec3d center = new Vec3d(bp.getX() + 0.5, bp.getY() + 0.5, bp.getZ() + 0.5);
         double dist = new Vec3d(p.getX(), p.getEyeY(), p.getZ()).distanceTo(center);
-        if (dist > 4.4) {
-            mineFail = "the block " + blockLocal(bp) + " is out of reach (" + fmt(dist) + " blocks)";
-            return M_FAIL;
+        if (dist > 4.0 && (reachWalk > 0 || dist > 4.4)) {
+            // v2.0.8: knocked back (shulker hit): walk back towards the block instead of giving up
+            double hd = Math.hypot(center.x - p.getX(), center.z - p.getZ());
+            if (hd > 9.0 || ++reachWalk > 160) {
+                c.options.forwardKey.setPressed(false);
+                c.options.jumpKey.setPressed(false);
+                mineFail = "the block " + blockLocal(bp) + " is out of reach (" + fmt(dist) + " blocks)";
+                return M_FAIL;
+            }
+            float yaw = (float) Math.toDegrees(Math.atan2(-(center.x - p.getX()), center.z - p.getZ()));
+            lookAngles(p, yaw, 15f);
+            double ux = -Math.sin(Math.toRadians(yaw)), uz = Math.cos(Math.toRadians(yaw));
+            boolean floorAhead = c.world.getBlockCollisions(p, p.getBoundingBox().offset(ux * 0.7, 0, uz * 0.7).stretch(0, -2.5, 0)).iterator().hasNext();
+            if (!floorAhead && hd > 0.8) {           // never walk off an edge
+                c.options.forwardKey.setPressed(false);
+                mineFail = "the block " + blockLocal(bp) + " is out of reach and the way back is not safe";
+                return M_FAIL;
+            }
+            c.options.forwardKey.setPressed(hd > 0.3);
+            c.options.jumpKey.setPressed(p.horizontalCollision && p.isOnGround());
+            if (reachWalk == 1) FlightRecorder.routine("REACH_WALK_BACK block=" + blockLocal(bp) + " dist=" + fmt(dist));
+            return M_WORKING;
+        }
+        if (reachWalk > 0) {
+            FlightRecorder.routine("REACH_WALK_DONE ticks=" + reachWalk + " dist=" + fmt(dist));
+            reachWalk = 0;
+            c.options.forwardKey.setPressed(false);
+            c.options.jumpKey.setPressed(false);
         }
         if (++mineTicks > 200) {
             mineFail = "breaking the block " + blockLocal(bp) + " takes too long";
