@@ -15,6 +15,7 @@ public class FlightScreen extends BilalScreen {
     private static String draftX = "";
     private static String draftZ = "";
     private static String pasteInfo = "";
+    private static String pasteDraft = "";
 
     public FlightScreen(Screen parent) {
         super("Auto Elytra", "Flies to your points, nearest first", 0x66CCFF, parent);
@@ -73,8 +74,17 @@ public class FlightScreen extends BilalScreen {
             }
         }, "Fills X and Z with where you stand");
         y += 24;
-        button("Paste points (clipboard)", left, y, inner, this::pasteFromClipboard,
-                "Reads your clipboard and adds every point in it. One point per line. Works with: 25773, -72911  or  X: 25773 Z: -72911  or  x, y, z. Points already in the queue are skipped");
+        TextFieldWidget paste = new TextFieldWidget(textRenderer, left, y, inner, 20, Text.literal("Paste points"));
+        paste.setMaxLength(20000);
+        paste.setPlaceholder(Text.literal("Click here and press Ctrl+V to paste points"));
+        paste.setText(pasteDraft);
+        paste.setChangedListener(s -> {
+            int before = pasteDraft.length();
+            pasteDraft = s;
+            // more than one character appearing at once = a paste
+            if (s.length() - before > 1) importPasted(s);
+        });
+        addDrawableChild(paste);
         if (!pasteInfo.isEmpty()) {
             label(pasteInfo, left, y + 26, 0xFF9A9AA8);
             y += 14;
@@ -240,11 +250,15 @@ public class FlightScreen extends BilalScreen {
         clearAndInit();
     }
 
-    private void pasteFromClipboard() {
-        String text = client.keyboard.getClipboard();
-        List<int[]> points = FlightConfig.parsePoints(text);
+    /** Called right after Ctrl+V into the paste field. Adds every point found, then empties the field. */
+    private void importPasted(String fieldText) {
+        String source = fieldText;
+        // a text field drops line breaks when pasting, so use the raw clipboard when it has several lines
+        String clip = client.keyboard.getClipboard();
+        if (clip != null && (clip.indexOf('\n') >= 0 || clip.indexOf('\r') >= 0)) source = clip;
+        List<int[]> points = FlightConfig.parsePoints(source);
         if (points.isEmpty()) {
-            pasteInfo = "No coordinates found in the clipboard";
+            pasteInfo = "No coordinates found in what you pasted";
         } else {
             int[] r = FlightConfig.addPoints(points);
             FlightConfig.save();
@@ -252,6 +266,7 @@ public class FlightScreen extends BilalScreen {
                     + (r[1] > 0 ? ", " + r[1] + " already in the queue" : "")
                     + (r[2] > 0 ? ", " + r[2] + " not added (max " + FlightConfig.MAX_POINTS + ")" : "");
         }
+        pasteDraft = "";
         clearAndInit();
     }
 

@@ -71,32 +71,60 @@ public final class FlightConfig {
     private static final Pattern NUMBER = Pattern.compile("-?\\d+(?:\\.\\d+)?");
     public static final int MAX_POINTS = 300;
 
+    private static final String N = "-?\\d+(?:\\.\\d+)?";
+    private static final Pattern LABELED = Pattern.compile(
+            "\\bx\\s*[:=]\\s*(" + N + ")[^zZ]*?\\bz\\s*[:=]\\s*(" + N + ")", Pattern.CASE_INSENSITIVE);
+    private static final Pattern COMMA_GROUP = Pattern.compile(
+            "(" + N + ")\\s*,\\s*(" + N + ")(?:\\s*,\\s*(" + N + "))?");
+
     /**
-     * Reads X/Z points from any text, one point per line.
-     * Accepts "x, z", "x z", "X: 1 Z: 2", "x, y, z" (y is ignored) and decimals.
-     * Lines that do not have 2 or 3 numbers are skipped.
+     * Reads X/Z points from any text. Accepts, in any mix:
+     *   one point per line:        25773, -72911   |   25773 -72911   |   X: 25773 Z: -72911   |   x, y, z
+     *   many points on ONE line:   31752, -97560 32392, -98168 31048, -97832 ...
+     * Decimals are floored. Lines that do not hold a usable point are skipped.
      */
     public static List<int[]> parsePoints(String text) {
         List<int[]> out = new ArrayList<>();
         if (text == null) return out;
+        text = text.replace('\u2212', '-').replace('\u2013', '-');
         for (String line : text.split("\\R")) {
-            Matcher m = NUMBER.matcher(line);
-            List<Double> nums = new ArrayList<>();
-            while (m.find() && nums.size() < 4) nums.add(Double.parseDouble(m.group()));
-            double x, z;
-            if (nums.size() == 2) {
-                x = nums.get(0);
-                z = nums.get(1);
-            } else if (nums.size() == 3) {
-                x = nums.get(0);
-                z = nums.get(2);
-            } else {
-                continue;
+            // 1) labeled: "X: 1 Z: 2" (any number per line, y label is skipped)
+            Matcher lab = LABELED.matcher(line);
+            boolean labeled = false;
+            while (lab.find()) {
+                labeled = true;
+                addParsed(out, lab.group(1), lab.group(2));
             }
-            if (Math.abs(x) > 30000000 || Math.abs(z) > 30000000) continue;
-            out.add(new int[]{(int) Math.floor(x), (int) Math.floor(z)});
+            if (labeled) continue;
+
+            Matcher m = NUMBER.matcher(line);
+            List<String> nums = new ArrayList<>();
+            while (m.find()) nums.add(m.group());
+            if (nums.size() == 2) {
+                addParsed(out, nums.get(0), nums.get(1));
+            } else if (nums.size() == 3) {
+                addParsed(out, nums.get(0), nums.get(2));      // x y z -> y ignored
+            } else if (nums.size() >= 4) {
+                // 2) several points on one line: "x, z x, z x, z" (or "x, y, z x, y, z")
+                Matcher g = COMMA_GROUP.matcher(line);
+                boolean any = false;
+                while (g.find()) {
+                    any = true;
+                    addParsed(out, g.group(1), g.group(3) != null ? g.group(3) : g.group(2));
+                }
+                // 3) plain numbers "x z x z x z"
+                if (!any && nums.size() % 2 == 0) {
+                    for (int i = 0; i < nums.size(); i += 2) addParsed(out, nums.get(i), nums.get(i + 1));
+                }
+            }
         }
         return out;
+    }
+
+    private static void addParsed(List<int[]> out, String xs, String zs) {
+        double x = Double.parseDouble(xs), z = Double.parseDouble(zs);
+        if (Math.abs(x) > 30000000 || Math.abs(z) > 30000000) return;
+        out.add(new int[]{(int) Math.floor(x), (int) Math.floor(z)});
     }
 
     /** Adds the points to the queue. Returns {added, alreadyInQueue, queueFull}. */
