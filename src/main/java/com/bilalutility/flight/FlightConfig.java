@@ -45,7 +45,7 @@ public final class FlightConfig {
     public static int searchRadius = 100;     // how far around a point it looks for the elytra item frame
     public static int landRadius = 40;        // landing this close to the point counts as "arrived"
     public static int routineMode = 1;        // ship routine: 0 off, 1 assisted (one key press per step), 2 full auto
-    public static boolean routineGlideExit = true;   // no pearl ground: jump out of the tunnel with the elytra (dangerous)
+    public static boolean routineGlideExit = true;   // leave the ship by gliding out of the tunnel; the pearl is the backup (off = pearl only)
     public static boolean routineDryRun = true; // only check and print what it would do
     public static int hudPos = 1;             // 0 off, 1 top centre, 2 top left, 3 top right
     public static int hudScale = 100;

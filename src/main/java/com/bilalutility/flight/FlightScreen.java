@@ -172,9 +172,9 @@ public class FlightScreen extends BilalScreen {
                 v -> FlightConfig.routineDryRun = v, FlightConfig::save,
                 "ON: the mod checks blocks, items and the pearl target and prints the plan, but does not move, mine, hit or throw anything. Turn it off for a real run");
         y += 24;
-        toggle(left, y, inner, "Glide exit if no pearl ground", () -> FlightConfig.routineGlideExit,
+        toggle(left, y, inner, "Leave by gliding (pearl = backup)", () -> FlightConfig.routineGlideExit,
                 v -> FlightConfig.routineGlideExit = v, FlightConfig::save,
-                "If no safe pearl ground is found, the mod puts the elytra on, steps out of the tunnel and flies away (DANGEROUS). Assisted asks you first, Full auto does it alone. Needs 6 rockets, a pearl, health 14");
+                "ON: the mod puts the elytra on, steps out of the tunnel and flies away. If gliding is not possible, or the elytra does not open, it uses the ender pearl as backup. OFF: pearl only. Needs 6 rockets, a pearl, health 14");
         y += 24;
         label("Step key: " + FlightClient.stepKeyText() + "   (set it in Controls)", left, y + 6, 0xFFFFFFFF);
         y += 12;

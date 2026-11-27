@@ -64,6 +64,7 @@ public class FlightClient implements ClientModInitializer {
             while (shipStepKey.wasPressed()) {
                 FlightShipRoutine.onStepKey(client);
             }
+            PingGuard.tick(client);
             FlightRunner.tick(client);
             FlightShipRoutine.tick(client);
         });

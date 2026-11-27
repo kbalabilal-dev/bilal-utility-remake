@@ -50,7 +50,7 @@ public final class FlightShipRoutine {
         TAKE_ELYTRA("Hit the frame and take the elytra", 700),
         STORE_ELYTRA("Store extra Elytras in the Ender Chest", 700),
         DIG_EXIT("Dig the exit tunnel", 700),
-        PEARL_OUT("Pearl to the ground", 900),
+        PEARL_OUT("Leave the ship: glide out (pearl = backup)", 900),
         TAKEOFF("Take off and fly again", 700);
 
         final String text;
@@ -139,6 +139,12 @@ public final class FlightShipRoutine {
     private static long bulletHitNow;
     // glide exit (used when no pearl ground exists)
     private static boolean glideAsk, glideConfirmed;
+    // v2.0.9: glide is the first way out. pearlOnly = gliding failed (or is switched off), so the pearl is used.
+    private static boolean pearlOnly;
+    private static int pingPause;
+    private static boolean bulletGiveUp;     // Full Auto: bullets keep coming -> stop fighting them, carry on with the step
+    private static int healRetries;
+    private static int emergencyThrows, lastEmergencyTick = -1000;
     private static int glideAir;
     private static double[] glideGround;          // ground the flight falls back on if something goes wrong (x, y, z)
     private static final int GLIDE_EXTRA_ROCKETS = 1;   // margin: the player moves a little before the flight checks its rockets
@@ -246,6 +252,10 @@ public final class FlightShipRoutine {
         glideAsk = false;
         glideConfirmed = false;
         glideGround = null;
+        pearlOnly = false;
+        emergencyThrows = 0;
+        healRetries = 0;
+        bulletGiveUp = false;
         scanActive = false;
         lastLine = "";
         abortReason = "";
@@ -301,7 +311,7 @@ public final class FlightShipRoutine {
         }
         if (FlightConfig.routineMode == 2) {
             phase = Phase.DELAY;
-            delayLeft = 50 + RND.nextInt(40);
+            delayLeft = 15 + RND.nextInt(15) + PingGuard.extraTicks();
         } else {
             phase = Phase.WAIT_KEY;
         }
@@ -417,6 +427,11 @@ public final class FlightShipRoutine {
         exitShulkerGiveUp = false;
         mineReset();
         scanActive = false;
+        pearlOnly = false;
+        emergencyThrows = 0;
+        bulletGiveUp = false;
+        pingPause = 0;
+        glideAir = 0;
         go(0);
         releaseKeys(c);
         FlightRecorder.routine("STEP_BEGIN step=" + s + " t=" + stepStartClock + " trigger=" + trigger
@@ -492,13 +507,13 @@ public final class FlightShipRoutine {
             // Storage is automatic even in Assisted mode; the user should not need
             // another key press between picking up the Elytra and protecting it.
             phase = Phase.DELAY;
-            delayLeft = 5 + RND.nextInt(6);
+            delayLeft = 2 + RND.nextInt(4) + PingGuard.extraTicks();
             say(c, "Elytra taken. Opening the Ender Chest...");
             return;
         }
         if (FlightConfig.routineMode == 2) {
             phase = Phase.DELAY;
-            delayLeft = 14 + RND.nextInt(28);
+            delayLeft = 4 + RND.nextInt(8) + PingGuard.extraTicks();
         } else {
             phase = Phase.WAIT_KEY;
             say(c, "Step done. Press [" + FlightClient.stepKeyText() + "]: " + STEPS[stepIndex].text);
@@ -565,7 +580,7 @@ public final class FlightShipRoutine {
         return true;
     }
 
-    private static final int MAX_STEP_RESTARTS = 2;
+    private static final int MAX_STEP_RESTARTS = 5;
     private static int stepRestarts, restartIndex = -1, healthWait;
     private static boolean afkRestart;
 
@@ -575,7 +590,8 @@ public final class FlightShipRoutine {
         return r.contains("sneak") || r.contains("frame facing missing") || r.contains("not on the ship roof")
                 || r.contains("falling") || r.contains("below the ship") || r.contains("flight did not start")
                 || r.contains("flight is already running") || r.contains("no pickaxe") || r.contains("no ender pearl")
-                || r.contains("no sword") || r.contains("no safe ground for the pearl");
+                || r.contains("no sword") || r.contains("no safe ground for the pearl")
+                || r.contains("take control") || r.contains("glide failed");
     }
 
     private static void abort(MinecraftClient c, String reason) {
@@ -589,7 +605,29 @@ public final class FlightShipRoutine {
         FlightRecorder.routine("STEP_END step=" + s + " start=" + stepStartClock + " end=" + FlightRecorder.clock()
                 + " result=ABORT reason=" + reason.replace(' ', '_')
                 + (p != null && frame != null ? " pos=" + local(p.getX(), p.getY(), p.getZ()) : ""));
-        // Full Auto (AFK): restart the same step by itself, at most twice, before giving up for good
+        if (FlightConfig.routineMode == 2 && p != null) {
+            String lr = reason.toLowerCase(Locale.ROOT);
+            // v2.0.9: low health: wait for the golden apple / regeneration, do not give control away (about 40 s)
+            if (lr.startsWith("health ") && lr.contains("below") && healRetries < 24) {
+                healRetries++;
+                FlightRecorder.routine("HEAL_WAIT step=" + s + " try=" + healRetries + " hp=" + fmt(p.getHealth()));
+                p.sendMessage(Text.literal("Ship routine: health is low - waiting to heal (" + healRetries + ")"), true);
+                afkRestart = true;
+                phase = Phase.DELAY;
+                delayLeft = 40;
+                return;
+            }
+            // v2.0.9: the pearl teleport came late: you are already on the ground far from the ship -> go on to the take off
+            if (s == Step.PEARL_OUT && lr.contains("below the ship") && p.isOnGround() && !FlightRunner.isRunning()) {
+                FlightRecorder.routine("PEARL_LATE_TELEPORT_ACCEPTED pos=" + local(p.getX(), p.getY(), p.getZ()));
+                stepIndex = STEPS.length - 1;
+                afkRestart = false;
+                phase = Phase.DELAY;
+                delayLeft = 20;
+                return;
+            }
+        }
+        // Full Auto (AFK): restart the same step by itself, a few times, before giving up for good
         if (FlightConfig.routineMode == 2 && p != null && !unrecoverable(reason)) {
             if (restartIndex != stepIndex) {
                 restartIndex = stepIndex;
@@ -629,7 +667,7 @@ public final class FlightShipRoutine {
 
     /** Human pause: returns true once, after a random number of ticks between min and max. */
     private static boolean waited(int min, int max) {
-        if (waitLeft < 0) waitLeft = min + RND.nextInt(max - min + 1);
+        if (waitLeft < 0) waitLeft = min + RND.nextInt(max - min + 1) + PingGuard.extraTicks();
         if (waitLeft > 0) {
             waitLeft--;
             return false;
@@ -641,7 +679,17 @@ public final class FlightShipRoutine {
     // ------------------------------------------------------------------ checks before a step
 
     private static String precheck(MinecraftClient c, ClientPlayerEntity p, Step s) {
-        if (s != Step.STORE_ELYTRA && (frame == null || frame.isRemoved())) return "the item frame is gone";
+        // v2.0.10: take the pickaxe / pearls from the inventory into the hotbar when they are missing
+        if (!FlightConfig.routineDryRun && s != Step.STORE_ELYTRA) {
+            if (s.ordinal() <= Step.DIG_EXIT.ordinal() && pickaxeSlot(p) < 0) refillHotbar(c, p, true);
+            if (hotbarSlot(p, Items.ENDER_PEARL) < 0) refillHotbar(c, p, false);
+        }
+        // v2.0.12: a pearl costs about 5 hp and the drop before it costs more: leave the ship with enough health
+        if (s == Step.PEARL_OUT && !FlightConfig.routineDryRun && p.getHealth() < 13.0f) {
+            return "health " + fmt(p.getHealth()) + " is below 13 before leaving the ship (a pearl costs 5)";
+        }
+        // v2.0.10: the frame entity is only needed until the elytra is taken. After that the saved ship position is used.
+        if (s.ordinal() <= Step.TAKE_ELYTRA.ordinal() && (frame == null || frame.isRemoved())) return "the item frame is gone";
         switch (s) {
             case EQUIP_PICKAXE -> {
                 if (pickaxeSlot(p) < 0) return "no pickaxe in the hotbar";
@@ -736,26 +784,29 @@ public final class FlightShipRoutine {
                 info.add("tunnel floor " + blockText(c, EXIT_FLOOR));
             }
             case PEARL_OUT -> {
+                String gw = FlightConfig.routineGlideExit ? glideChecks(c, p, true) : "glide exit is switched off in the settings";
+                if (gw == null) {
+                    info.add("would GLIDE out of the tunnel (elytra, then the normal flight)");
+                    if (glideGround != null) {
+                        info.add("backup ground if the elytra does not open (pearl): x " + fmt(glideGround[0]) + " y " + fmt(glideGround[1]) + " z " + fmt(glideGround[2]));
+                    }
+                } else {
+                    info.add("cannot glide: " + gw + " - would use the PEARL");
+                }
                 long t0 = System.nanoTime();
                 PearlPlan pl = scanPearl(c, theoryEye());
                 long ms = (System.nanoTime() - t0) / 1_000_000L;
                 FlightRecorder.routine("PEARL_SCAN ms=" + ms + " tried=" + scTried + " found=" + (pl != null) + " mode=dry_run_one_tick");
-                info.add("pearl scan cost " + ms + " ms in one tick (the real run spreads it over several ticks)");
                 if (pl == null) {
-                    String sum = scanSummary();
-                    String why = glideChecks(c, p, true);
-                    if (!FlightConfig.routineGlideExit || why != null) {
-                        abort(c, "no safe ground for the pearl (" + sum + ")" + (why == null ? " and glide exit is switched off" : " and no glide exit: " + why));
+                    info.add("pearl from the tunnel: no safe ground (" + scanSummary() + ")");
+                    if (gw != null) {
+                        abort(c, "cannot glide (" + gw + ") and no safe pearl ground (" + scanSummary() + ")");
                         return;
                     }
-                    info.add("no safe pearl ground (" + sum + "): would GLIDE out of the tunnel (elytra, then the normal flight)");
-                    if (glideGround != null) {
-                        info.add("fallback ground if the flight fails: x " + fmt(glideGround[0]) + " y " + fmt(glideGround[1]) + " z " + fmt(glideGround[2]));
-                    }
-                    pl = null;
-                } else
-                info.add("pearl: yaw " + fmt(pl.yaw) + " pitch " + fmt(pl.pitch) + " lands " + fmt(pl.dist) + " blocks away at Y " + fmt(pl.landY)
-                        + " (" + local(pl.landX, pl.landY, pl.landZ) + ")");
+                } else {
+                    info.add("pearl from the tunnel: yaw " + fmt(pl.yaw) + " pitch " + fmt(pl.pitch) + " lands " + fmt(pl.dist) + " blocks away at Y " + fmt(pl.landY)
+                            + " (" + local(pl.landX, pl.landY, pl.landZ) + ")");
+                }
             }
             case TAKEOFF -> info.add("would start the flight (existing take off logic from the ground)");
         }
@@ -777,12 +828,27 @@ public final class FlightShipRoutine {
         boolean flightHandOver = s == Step.PEARL_OUT && sub >= 8;      // the flight owns the keys now
         if (p.getHealth() >= 8.0f) healthWait = 0;
         if (p.getHealth() < 8.0f && !flightHandOver && s != Step.STORE_ELYTRA) {
+            // v2.0.12: never stand still while bullets hit us
+            boolean actingNow = s != Step.TAKEOFF && !(s == Step.PEARL_OUT && sub >= 4);
+            if (actingNow && (p.isOnGround() || p.hasStatusEffect(StatusEffects.LEVITATION))
+                    && defend(c, p, p.hasStatusEffect(StatusEffects.LEVITATION))) {
+                return;
+            }
             // Full Auto: stand still and let the golden apple / regeneration work (up to 60 s) instead of stopping
             if (FlightConfig.routineMode == 2 && ++healthWait <= 1200) {
                 releaseKeys(c);
                 return;
             }
             abort(c, "health below 8 (" + fmt(p.getHealth()) + ")");
+            return;
+        }
+        // v2.0.14: very high ping: wait before risky server side actions (not a stop, at most about 60 s per step)
+        if (PingGuard.spike() && pingPause < 1200 && !flightHandOver && riskyForPing(s, sub)) {
+            if (pingPause++ % 100 == 0) {
+                FlightRecorder.routine("PING_WAIT step=" + s + " sub=" + sub + " ping=" + PingGuard.ms());
+                p.sendMessage(Text.literal("Ship routine: ping is " + PingGuard.ms() + " ms - waiting for it to drop"), true);
+            }
+            releaseKeys(c);
             return;
         }
         boolean lev = p.hasStatusEffect(StatusEffects.LEVITATION);
@@ -836,11 +902,12 @@ public final class FlightShipRoutine {
     private static void stepEquip(MinecraftClient c, ClientPlayerEntity p) {
         int slot = pickaxeSlot(p);
         if (slot < 0) {
-            abort(c, "no pickaxe in the hotbar");
+            if (refillHotbar(c, p, true)) return;          // v2.0.10: try again next tick
+            abort(c, "no pickaxe in the hotbar or inventory");
             return;
         }
         if (sub == 0) {
-            if (!waited(4, 11)) return;
+            if (!waited(2, 4)) return;
             p.getInventory().setSelectedSlot(slot);
             go(1);
             return;
@@ -882,7 +949,7 @@ public final class FlightShipRoutine {
                 }
             }
             case 1 -> {
-                if (!waited(4, 9)) return;
+                if (!waited(2, 4)) return;
                 String why = dropChecks(c, p, d);
                 if (why != null) {
                     abort(c, why);
@@ -925,7 +992,7 @@ public final class FlightShipRoutine {
                 finishStep(c, "OK", "block_already_air");
                 return;
             }
-            if (!waited(5, 12)) return;
+            if (!waited(2, 5)) return;
             String why = standCheck(c, p);
             if (why != null) {
                 abort(c, why);
@@ -1003,7 +1070,7 @@ public final class FlightShipRoutine {
                 double err = look(p, new Vec3d(fx, fy, fz));
                 boolean on = c.crosshairTarget instanceof EntityHitResult eh && eh.getEntity() == frame;
                 if (err < 1.0 && on) {
-                    if (waited(3, 8)) {
+                    if (waited(2, 3)) {
                         c.interactionManager.attackEntity(p, frame);
                         p.swingHand(Hand.MAIN_HAND);
                         hitTries++;
@@ -1133,7 +1200,7 @@ public final class FlightShipRoutine {
 
         if (sub == 1) {
             if (p.currentScreenHandler == p.playerScreenHandler) {
-                if (subTick > 100) {
+                if (subTick > 100 + 10 * PingGuard.extraTicks()) {
                     finishStep(c, "OK", "enderchest_unavailable; Elytras kept in inventory");
                 }
                 return;
@@ -1176,7 +1243,7 @@ public final class FlightShipRoutine {
                 finishStep(c, "OK", "enderchest_closed_after_transfer");
                 return;
             }
-            if (handler.getCursorStack().isEmpty() && subTick >= 3) {
+            if (handler.getCursorStack().isEmpty() && subTick >= 3 + PingGuard.extraTicks()) {
                 // Keep going until only the protected plain backup remains, or the chest is full.
                 int nextSource = extraPlainElytraPlayerSlot(p);
                 int totalSlots = handler.getStacks().size();
@@ -1205,7 +1272,7 @@ public final class FlightShipRoutine {
                 FlightRecorder.routine("ENDER_CHEST_STORED through source=" + storageSourceSlot + " dest=" + storageDestSlot);
                 finishStep(c, "OK", nextSource >= 0 ? "enderchest_full; remaining_extras_kept_in_inventory"
                         : "stored_extras; enchanted_elytras_and_one_plain_backup_kept");
-            } else if (!handler.getCursorStack().isEmpty() && subTick > 25) {
+            } else if (!handler.getCursorStack().isEmpty() && subTick > 25 + 3 * PingGuard.extraTicks()) {
                 // Closing returns any cursor item to the player's inventory; never drop it.
                 p.closeHandledScreen();
                 finishStep(c, "OK", "transfer_not_confirmed; Elytra returned to inventory");
@@ -1268,7 +1335,7 @@ public final class FlightShipRoutine {
                 }
             }
             case 1, 3 -> {
-                if (!waited(3, 9)) return;
+                if (!waited(2, 4)) return;
                 if (locate(c, p) != L_CHEST) {
                     diag(c, p, "LEFT_DIG_STANCE");
                     abort(c, "you are no longer on the chest top (" + local(p.getX(), p.getY(), p.getZ()) + ")");
@@ -1301,7 +1368,8 @@ public final class FlightShipRoutine {
     private static void stepPearl(MinecraftClient c, ClientPlayerEntity p) {
         int slot = hotbarSlot(p, Items.ENDER_PEARL);
         if (slot < 0 && sub < 4) {
-            abort(c, "no ender pearl in the hotbar");
+            if (refillHotbar(c, p, false)) return;         // v2.0.10: try again next tick
+            abort(c, "no ender pearl in the hotbar or inventory");
             return;
         }
         switch (sub) {
@@ -1312,9 +1380,9 @@ public final class FlightShipRoutine {
                 double[] goal = (loc == L_LEDGE || loc == L_UNKNOWN) ? SPOT_DIG : SPOT_PEARL;
                 int r = walkTo(c, p, wx(goal[0], goal[1]), wz(goal[0], goal[1]), 0.20, false);
                 if (r == W_UNSAFE) {
-                    if (!retryNavigation(c, "unsafe route to pearl spot")) abort(c, "unsafe path to the pearl spot (see the DIAG lines in the log)");
+                    if (!retryNavigation(c, "unsafe route to pearl spot") && !glideFromHere(c, p, "unsafe route to the pearl spot")) abort(c, "unsafe path to the pearl spot (see the DIAG lines in the log)");
                 } else if (r == W_STUCK) {
-                    if (!retryNavigation(c, "stuck on the way to pearl spot")) abort(c, "stuck on the way to the pearl spot");
+                    if (!retryNavigation(c, "stuck on the way to pearl spot") && !glideFromHere(c, p, "stuck on the way to the pearl spot")) abort(c, "stuck on the way to the pearl spot");
                 }
                 else if (r == W_ARRIVED) {
                     int at = locate(c, p);
@@ -1330,19 +1398,23 @@ public final class FlightShipRoutine {
                 }
             }
             case 1 -> {
-                if (glideConfirmed) {
+                // v2.0.9: GLIDE FIRST. The pearl is only the backup when gliding is not possible.
+                if (!pearlOnly && FlightConfig.routineGlideExit) {
+                    if (!waited(2, 5)) return;
                     String gw = glideChecks(c, p, true);
-                    if (gw != null) {
-                        abort(c, gw);
+                    if (gw == null) {
+                        FlightRecorder.routine("GLIDE_EXIT_START pos=" + local(p.getX(), p.getY(), p.getZ()) + " hp=" + fmt(p.getHealth())
+                                + " fallback=" + fmt(glideGround[0]) + "," + fmt(glideGround[1]) + "," + fmt(glideGround[2]));
+                        go(6);
                         return;
                     }
-                    FlightRecorder.routine("GLIDE_EXIT_START pos=" + local(p.getX(), p.getY(), p.getZ()) + " hp=" + fmt(p.getHealth())
-                            + " fallback=" + fmt(glideGround[0]) + "," + fmt(glideGround[1]) + "," + fmt(glideGround[2]));
-                    go(6);
-                    return;
+                    pearlOnly = true;
+                    FlightRecorder.routine("GLIDE_NOT_POSSIBLE reason=" + gw.replace(' ', '_') + " -> pearl backup");
+                    p.sendMessage(Text.literal("Ship routine: cannot glide (" + gw + ") - using the pearl instead"), false);
+                    subTick = 0;
                 }
                 if (!scanActive) {
-                    if (!waited(5, 12)) return;
+                    if (!waited(2, 5)) return;
                     String why = standCheck(c, p);
                     if (why != null) {
                         abort(c, why);
@@ -1357,26 +1429,8 @@ public final class FlightShipRoutine {
                 if (plan == null) {
                     String sum = scanSummary();
                     FlightRecorder.routine("PEARL_SCAN_FAILED " + sum.replace(' ', '_'));
-                    String gw = glideChecks(c, p, true);
-                    if (!FlightConfig.routineGlideExit) {
-                        abort(c, "no safe ground for the pearl (" + sum + ") and glide exit is switched off");
-                        return;
-                    }
-                    if (gw != null) {
-                        abort(c, "no safe ground for the pearl (" + sum + ") and no glide exit: " + gw);
-                        return;
-                    }
-                    if (FlightConfig.routineMode == 2) {
-                        glideConfirmed = true;
-                        p.sendMessage(Text.literal("Ship routine: no safe pearl ground (" + sum + ") - gliding out (full auto)"), false);
-                        go(6);
-                    } else {
-                        glideAsk = true;
-                        releaseKeys(c);
-                        phase = Phase.WAIT_KEY;
-                        alertLeft = 60;
-                        p.sendMessage(Text.literal("Ship routine: no safe pearl ground (" + sum + "). Press the step key to GLIDE out, or sneak to stop."), false);
-                    }
+                    String gw = FlightConfig.routineGlideExit ? glideChecks(c, p, false) : "glide exit is switched off";
+                    abort(c, "no safe ground for the pearl (" + sum + ") and no glide: " + (gw == null ? "glide was not used" : gw));
                     return;
                 }
                 FlightRecorder.routine("PEARL_PLAN yaw=" + fmt(plan.yaw) + " pitch=" + fmt(plan.pitch) + " dist=" + fmt(plan.dist)
@@ -1385,7 +1439,7 @@ public final class FlightShipRoutine {
             }
             case 2 -> {
                 if (subTick == 1) p.getInventory().setSelectedSlot(slot);
-                if (waited(6, 12)) go(3);
+                if (waited(3, 6)) go(3);
             }
             case 3 -> {
                 if (!p.getMainHandStack().isOf(Items.ENDER_PEARL)) {
@@ -1394,7 +1448,7 @@ public final class FlightShipRoutine {
                 }
                 double err = lookAngles(p, plan.yaw, plan.pitch);
                 aimOk = err < 0.3 ? aimOk + 1 : 0;
-                if (aimOk >= 4 && p.isOnGround() && waited(2, 6)) {
+                if (aimOk >= 4 && p.isOnGround() && waited(2, 3)) {
                     pearlBefore = countItem(p, Items.ENDER_PEARL);
                     c.interactionManager.interactItem(p, Hand.MAIN_HAND);
                     throwNow = now;
@@ -1416,14 +1470,14 @@ public final class FlightShipRoutine {
                 lastPx = p.getX();
                 lastPy = p.getY();
                 lastPz = p.getZ();
-                if (now - throwNow == 15 && countItem(p, Items.ENDER_PEARL) >= pearlBefore) abort(c, "the pearl was not thrown");
-                else if (now - throwNow > 160) abort(c, "the pearl did not teleport you");
+                if (now - throwNow == 15 + 2 * PingGuard.extraTicks() && countItem(p, Items.ENDER_PEARL) >= pearlBefore) abort(c, "the pearl was not thrown");
+                else if (now - throwNow > 160 + 3 * PingGuard.extraTicks() && (now - throwNow > 600 || !ownPearlFlying(c, p))) abort(c, "the pearl did not teleport you");
             }
             case 6 -> {
                 // put the elytra on (the runner may have put a chestplate on after landing)
                 if (p.hasStatusEffect(StatusEffects.LEVITATION)) return;
                 if (p.getEquippedStack(EquipmentSlot.CHEST).isOf(Items.ELYTRA)) {
-                    if (waited(6, 14)) go(7);
+                    if (waited(3, 7)) go(7);
                 } else {
                     if (subTick % 10 == 1) swapElytraIntoChest(c);
                     if (subTick > 80) abort(c, "could not put the elytra on");
@@ -1438,6 +1492,7 @@ public final class FlightShipRoutine {
                         FlightRecorder.routine("GLIDE_EXIT_JUMPED pos=" + local(p.getX(), p.getY(), p.getZ()));
                         if (glideGround != null) FlightRunner.setFallbackIsland(glideGround[0], glideGround[1], glideGround[2]);
                         FlightRunner.startFromShipRoutine(c);
+                        releaseKeys(c);
                         go(8);
                     }
                     return;
@@ -1446,36 +1501,61 @@ public final class FlightShipRoutine {
                 // last look before the point of no return (still standing on the tunnel floor): can the flight really start?
                 String gw = glideChecks(c, p, false);
                 if (gw != null) {
-                    abort(c, gw);
+                    // v2.0.9: still standing in the tunnel, so the pearl is still possible: go back to the pearl stance
+                    pearlOnly = true;
+                    releaseKeys(c);
+                    FlightRecorder.routine("GLIDE_CANCELLED_IN_TUNNEL reason=" + gw.replace(' ', '_') + " -> pearl backup");
+                    p.sendMessage(Text.literal("Ship routine: glide not possible any more (" + gw + ") - using the pearl instead"), false);
+                    go(0);
                     return;
                 }
                 int r = walkTo(c, p, wx(-4.0, SPOT_PEARL[1]), wz(-4.0, SPOT_PEARL[1]), 0.20, true);
                 if (r == W_UNSAFE) {
-                    if (!retryNavigation(c, "blocked while stepping out for glide")) abort(c, "blocked while stepping out of the tunnel");
+                    if (!retryNavigation(c, "blocked while stepping out for glide") && !walkOff(c, p)) abort(c, "blocked while stepping out of the tunnel");
                 } else if (r == W_STUCK) {
-                    if (!retryNavigation(c, "stuck while stepping out for glide")) abort(c, "stuck while stepping out of the tunnel");
+                    if (!retryNavigation(c, "stuck while stepping out for glide") && !walkOff(c, p)) abort(c, "stuck while stepping out of the tunnel");
                 }
                 if (subTick > 120) {
-                    if (!retryNavigation(c, "glide exit route timed out")) abort(c, "could not step out of the tunnel");
+                    if (!retryNavigation(c, "glide exit route timed out") && !walkOff(c, p)) abort(c, "could not step out of the tunnel");
                 }
             }
             case 8 -> {
-                if (FlightRunner.isRunning()) {
-                    if (p.isGliding()) {
-                        FlightRecorder.routine("STEP_END step=PEARL_OUT start=" + stepStartClock + " end=" + FlightRecorder.clock()
-                                + " ticks=" + (now - stepStartNow) + " result=GLIDE pos=" + local(p.getX(), p.getY(), p.getZ()));
-                        stepIndex = STEPS.length - 1;          // the flight is running: the routine is finished
-                        finishStep(c, "OK", "glide_exit");
-                    } else if (subTick == 21 && !p.isOnGround()) {
-                        // last resort: the elytra did not open about 1 second after the jump
-                        FlightRecorder.routine("GLIDE_EXIT_NOT_OPEN pos=" + local(p.getX(), p.getY(), p.getZ())
-                                + " vy=" + fmt(p.getVelocity().y));
-                        alertLeft = 100;
-                        p.sendMessage(Text.literal("Ship routine WARNING: the elytra has not opened after 1 second - "
-                                + "you are falling! Press jump, or sneak to take control."), false);
+                // v2.0.9: the glide is the plan, the pearl is the backup when the elytra does not open
+                if (FlightRunner.isRunning() && p.isGliding()) {
+                    FlightRecorder.routine("STEP_END step=PEARL_OUT start=" + stepStartClock + " end=" + FlightRecorder.clock()
+                            + " ticks=" + (now - stepStartNow) + " result=GLIDE pos=" + local(p.getX(), p.getY(), p.getZ())
+                            + " pearlBackups=" + emergencyThrows);
+                    stepIndex = STEPS.length - 1;          // the flight is running: the routine is finished
+                    finishStep(c, "OK", "glide_exit");
+                    return;
+                }
+                if (p.isOnGround()) {
+                    if (emergencyThrows > 0 && !FlightRunner.isRunning()) {
+                        abort(c, "the glide failed and the pearl backup put you on the ground - take control");
+                    } else if (!FlightRunner.isRunning() && subTick > 5) {
+                        abort(c, "the flight did not start (read the message above) - you are on the ground");
                     }
-                } else if (subTick > 2) {
-                    abort(c, "the flight did not start (read the message above) - you are in the air, take control!");
+                    return;
+                }
+                // in the air and not gliding
+                boolean runnerGone = !FlightRunner.isRunning() && subTick > 2;
+                boolean notOpen = FlightRunner.isRunning() && subTick >= 21;
+                if (runnerGone || notOpen) {
+                    if (emergencyThrows == 0 || now - lastEmergencyTick > 40) {
+                        if (emergencyThrows < 3 && FlightRunner.emergencyPearl(c)) {
+                            emergencyThrows++;
+                            lastEmergencyTick = (int) now;
+                            FlightRecorder.routine("GLIDE_FAILED_PEARL_BACKUP try=" + emergencyThrows + " pos="
+                                    + local(p.getX(), p.getY(), p.getZ()) + " vy=" + fmt(p.getVelocity().y)
+                                    + " runner=" + FlightRunner.isRunning());
+                            p.sendMessage(Text.literal("Ship routine: the elytra did not open - pearl backup thrown (" + emergencyThrows + ")"), false);
+                        } else if (emergencyThrows >= 3 || subTick % 20 == 1) {
+                            alertLeft = 100;
+                            p.sendMessage(Text.literal("Ship routine WARNING: not gliding and the pearl backup is not possible - "
+                                    + "you are falling! Press jump, or sneak to take control."), false);
+                            if (runnerGone && emergencyThrows >= 3) abort(c, "the glide failed and the pearl backup did not work - you are in the air, take control!");
+                        }
+                    }
                 }
             }
             default -> {
@@ -1493,7 +1573,7 @@ public final class FlightShipRoutine {
                 return;
             }
             if (!p.isOnGround() || p.hasStatusEffect(StatusEffects.LEVITATION) || p.getVelocity().lengthSquared() > 0.01) return;
-            if (!waited(10, 25)) return;
+            if (!waited(4, 10)) return;
             FlightRunner.startFromShipRoutine(c);
             go(1);
             return;
@@ -1581,6 +1661,15 @@ public final class FlightShipRoutine {
      */
     private static boolean defend(MinecraftClient c, ClientPlayerEntity p, boolean lev) {
         if (bulletCd > 0) bulletCd--;
+        if (bulletGiveUp) {
+            if (p.getHealth() < 9.0f) {          // v2.0.12: hurt again: fight the bullets again instead of ignoring them
+                bulletGiveUp = false;
+                defendTicks = 0;
+                FlightRecorder.routine("BULLETS_FIGHT_AGAIN hp=" + fmt(p.getHealth()));
+            } else {
+                return false;
+            }
+        }
         if (bullet != null && bullet.isRemoved()) {
             if (bulletHitNow > 0) {
                 bulletsStopped++;
@@ -1622,6 +1711,14 @@ public final class FlightShipRoutine {
             FlightRecorder.routine("BULLET_SEEN dist=" + fmt(dist) + " levitation=" + lev + " hp=" + fmt(p.getHealth()));
         }
         if (++defendTicks > 160) {
+            if (FlightConfig.routineMode == 2) {
+                // v2.0.9: do not give control away: stop fighting bullets and carry on with the step
+                bulletGiveUp = true;
+                bullet = null;
+                bulletLogged = false;
+                FlightRecorder.routine("BULLETS_IGNORED total=" + bulletsStopped + " -> carrying on");
+                return false;
+            }
             abort(c, "could not stop the shulker bullets (they keep coming)");
             return true;
         }
@@ -2350,6 +2447,75 @@ public final class FlightShipRoutine {
 
     // ------------------------------------------------------------------ glide exit
 
+    private static boolean riskyForPing(Step s, int sub) {
+        return (s == Step.STORE_ELYTRA && sub == 0) || s == Step.TAKE_ELYTRA || s == Step.DIG_UNDER_SHULKER
+                || s == Step.EQUIP_PICKAXE || (s == Step.PEARL_OUT && sub <= 3);
+    }
+
+    /** v2.0.12: true while a pearl thrown by us is still flying (the server can be slow: do not give up too early). */
+    private static boolean ownPearlFlying(MinecraftClient c, ClientPlayerEntity p) {
+        for (net.minecraft.entity.Entity e : c.world.getEntities()) {
+            if (e.getType() == net.minecraft.entity.EntityType.ENDER_PEARL && !e.isRemoved()
+                    && e instanceof net.minecraft.entity.projectile.ProjectileEntity pe && pe.getOwner() == p) return true;
+        }
+        return false;
+    }
+
+    /** v2.0.10: move a pickaxe (or an ender pearl stack) from the inventory into the hotbar. Returns true when it clicked. */
+    private static boolean refillHotbar(MinecraftClient c, ClientPlayerEntity p, boolean pickaxe) {
+        if (c == null || p == null || c.interactionManager == null) return false;
+        PlayerScreenHandler h = p.playerScreenHandler;
+        int src = -1;
+        for (int sl = 9; sl <= 35 && src < 0; sl++) {
+            ItemStack st = h.getSlot(sl).getStack();
+            if (pickaxe ? isPickaxe(st) : st.isOf(Items.ENDER_PEARL)) src = sl;
+        }
+        if (src < 0) return false;
+        int dest = -1;
+        for (int i = 0; i < 9 && dest < 0; i++) {
+            if (p.getInventory().getStack(i).isEmpty()) dest = i;
+        }
+        for (int i = 7; i >= 0 && dest < 0; i--) {           // slot 8 stays free for the auto apple
+            ItemStack st = p.getInventory().getStack(i);
+            String id = Registries.ITEM.getId(st.getItem()).getPath();
+            if (st.isOf(Items.FIREWORK_ROCKET) || st.isOf(Items.ENDER_PEARL) || isPickaxe(st) || st.isOf(Items.ELYTRA)
+                    || id.contains("sword") || id.contains("apple") || id.contains("totem")) continue;
+            dest = i;
+        }
+        if (dest < 0) return false;
+        c.interactionManager.clickSlot(h.syncId, src, dest, SlotActionType.SWAP, p);
+        FlightRecorder.routine("REFILL_HOTBAR item=" + (pickaxe ? "pickaxe" : "ender_pearl") + " from=" + src + " to=" + dest);
+        return true;
+    }
+
+    /** v2.0.9: not in the tunnel (roof, air after levitation): glide from where we stand instead of giving control away. */
+    private static boolean glideFromHere(MinecraftClient c, ClientPlayerEntity p, String why) {
+        if (!FlightConfig.routineGlideExit) return false;
+        String gw = glideChecks(c, p, true);
+        if (gw != null) {
+            FlightRecorder.routine("GLIDE_FROM_HERE_REFUSED why=" + why.replace(' ', '_') + " reason=" + gw.replace(' ', '_'));
+            return false;
+        }
+        FlightRecorder.routine("GLIDE_FROM_HERE why=" + why.replace(' ', '_') + " pos=" + local(p.getX(), p.getY(), p.getZ()));
+        p.sendMessage(Text.literal("Ship routine: " + why + " - gliding out from here"), false);
+        pearlOnly = false;
+        navigationRetries = 0;
+        go(6);
+        return true;
+    }
+
+    /** v2.0.9: walk/jump straight off the ship towards the tunnel side so the elytra can open (not used inside the tunnel). */
+    private static boolean walkOff(MinecraftClient c, ClientPlayerEntity p) {
+        if (locate(c, p) == L_TUNNEL) return false;
+        double dx = wx(-4.0, SPOT_PEARL[1]) - p.getX(), dz = wz(-4.0, SPOT_PEARL[1]) - p.getZ();
+        lookAngles(p, (float) Math.toDegrees(Math.atan2(-dx, dz)), 8f);
+        c.options.forwardKey.setPressed(true);
+        c.options.sprintKey.setPressed(true);
+        c.options.jumpKey.setPressed(p.isOnGround());
+        if (subTick % 40 == 1) FlightRecorder.routine("WALK_OFF pos=" + local(p.getX(), p.getY(), p.getZ()));
+        return true;
+    }
+
     /** The dangerous fallback: jump out of the tunnel with the elytra and let the normal flight take over. */
     private static String glideChecks(MinecraftClient c, ClientPlayerEntity p, boolean refreshGround) {
         if (!FlightConfig.routineGlideExit) return "glide exit is switched off in the settings";
@@ -2358,6 +2524,7 @@ public final class FlightShipRoutine {
         if (countItem(p, Items.FIREWORK_ROCKET) < 6 || hotbarSlot(p, Items.FIREWORK_ROCKET) < 0) {
             return "you need at least 6 firework rockets, with some in the hotbar";
         }
+        if (hotbarSlot(p, Items.ENDER_PEARL) < 0) refillHotbar(c, p, false);
         if (hotbarSlot(p, Items.ENDER_PEARL) < 0) return "no ender pearl in the hotbar for the void rescue";
         ItemStack worn = p.getEquippedStack(EquipmentSlot.CHEST);
         if (!worn.isOf(Items.ELYTRA) && countElytra(p) == 0) return "no elytra to glide with";

@@ -471,8 +471,7 @@ public final class FlightRunner {
 
     /** Called every rendered frame (faster than a tick): the last line of defence against the void. */
     public static void frameCheck(MinecraftClient client) {
-        // Safety watchdogs are only armed while an Elytra search queue or its ship routine is active.
-        if (state == State.IDLE && !FlightShipRoutine.isActive()) return;
+        // v2.0.12: the void watchdog is ALWAYS armed in the End (also when a routine stopped and you fly by hand).
         if (!FlightConfig.teamhome || client == null || client.player == null || client.world == null) return;
         if (client.world.getRegistryKey() != World.END) return;
         if (client.player.getY() >= FlightConfig.teamhomeY) return;
@@ -498,6 +497,7 @@ public final class FlightRunner {
             return;
         }
         FlightRecorder.tick(client, state.name(), state == State.IDLE);
+        idleGuard(client);
         // Do not eat or swap golden apples while idle; healing is scoped to active search/routine work.
         if ((state != State.IDLE || FlightShipRoutine.isActive())
                 && FlightShipRoutine.tickAutoGoldenApple(client)) return;
@@ -1975,6 +1975,103 @@ public final class FlightRunner {
         return Double.NaN;
     }
 
+    /**
+     * v2.0.9: backup for the ship routine's glide exit. The elytra did not open, so throw the pearl at the fallback
+     * ground now (the normal rescue waits until the player is below pearlBelowY). Works with or without a running flight.
+     */
+    public static boolean emergencyPearl(MinecraftClient client) {
+        if (client == null || client.player == null || client.interactionManager == null) return false;
+        if (hotbarSlot(client.player, Items.ENDER_PEARL) < 0) return false;
+        if (state != State.IDLE && ticks - lastPearl <= 40) return false;
+        if (state == State.IDLE) islandKnown = false;          // a refused start leaves an old island behind
+        if (!ensureIsland()) return false;
+        throwPearl(client);
+        return true;
+    }
+
+    private static long lastIdleGuard;
+
+    /** v2.0.12: nothing is running (a routine stopped, or you fly by hand) and you fall towards the void: pearl rescue. */
+    private static void idleGuard(MinecraftClient client) {
+        if (state != State.IDLE || !FlightConfig.pearlRescue || client.player == null || client.world == null) return;
+        if (client.world.getRegistryKey() != World.END) return;
+        ClientPlayerEntity p = client.player;
+        if (p.isOnGround() || p.isCreative() || p.isSpectator() || p.getAbilities().flying) return;
+        if (p.getY() >= FlightConfig.pearlBelowY || p.getVelocity().y > -0.6) return;
+        long now = System.currentTimeMillis();
+        if (now - lastIdleGuard < 1500 || hotbarSlot(p, Items.ENDER_PEARL) < 0) return;
+        islandKnown = false;
+        scanIslands(client);
+        if (!islandKnown) return;
+        lastIdleGuard = now;
+        FlightRecorder.routine("IDLE_GUARD_PEARL pos=" + (int) p.getX() + "," + (int) p.getY() + "," + (int) p.getZ());
+        throwPearl(client);
+    }
+
+    /** v2.0.12: simulate the pearl for many aims and pick the safest landing (flat top, not on an edge) nearest to the island. */
+    private static float[] aimPearl(MinecraftClient client, ClientPlayerEntity p) {
+        double tx = islandX + 0.5, tz = islandZ + 0.5;
+        float baseYaw = (float) Math.toDegrees(Math.atan2(-(tx - p.getX()), tz - p.getZ()));
+        Vec3d start = new Vec3d(p.getX(), p.getEyeY() - 0.1, p.getZ());
+        Vec3d mv = p.getVelocity();
+        float[] best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int dy = -12; dy <= 12; dy += 4) {
+            for (int pitch = -80; pitch <= 5; pitch += 5) {
+                float yaw = baseYaw + dy;
+                double[] land = simPearl(client, start, yaw, pitch, mv.x, p.isOnGround() ? 0 : mv.y, mv.z);
+                if (land == null) continue;
+                double d = Math.hypot(land[0] - tx, land[1] - tz);
+                if (d < bestD) {
+                    bestD = d;
+                    best = new float[]{yaw, pitch};
+                }
+            }
+        }
+        return best;
+    }
+
+    /** Returns the landing x,z of a SAFE landing (2 blocks of flat ground around, 2 free blocks above), else null. */
+    private static double[] simPearl(MinecraftClient client, Vec3d start, float yaw, float pitch, double ax, double ay, double az) {
+        double yr = Math.toRadians(yaw), pr = Math.toRadians(pitch);
+        double vx = -Math.sin(yr) * Math.cos(pr) * 1.5 + ax;
+        double vy = -Math.sin(pr) * 1.5 + ay;
+        double vz = Math.cos(yr) * Math.cos(pr) * 1.5 + az;
+        double x = start.x, y = start.y, z = start.z;
+        double lx = x, ly = y, lz = z;
+        for (int tick = 0; tick < 220; tick++) {
+            double nx = x + vx, ny = y + vy, nz = z + vz;
+            for (int s = 1; s <= 8; s++) {
+                double px = x + (nx - x) * s / 8.0, py = y + (ny - y) * s / 8.0, pz = z + (nz - z) * s / 8.0;
+                int bx = MathHelper.floor(px), by = MathHelper.floor(py), bz = MathHelper.floor(pz);
+                if (!chunkLoaded(client, px, pz)) return null;
+                if (solid(client, bx, by, bz)) {
+                    // the pearl must come down on the TOP of this block (not on a side wall)
+                    if (MathHelper.floor(lx) != bx || MathHelper.floor(lz) != bz || MathHelper.floor(ly) <= by) return null;
+                    if (solid(client, bx, by + 1, bz) || solid(client, bx, by + 2, bz)) return null;
+                    int support = 0;
+                    for (int ox = -1; ox <= 1; ox++) {
+                        for (int oz = -1; oz <= 1; oz++) {
+                            if (solid(client, bx + ox, by, bz + oz) && !solid(client, bx + ox, by + 1, bz + oz)) support++;
+                        }
+                    }
+                    return support >= 8 ? new double[]{lx, lz} : null;
+                }
+                lx = px;
+                ly = py;
+                lz = pz;
+            }
+            x = nx;
+            y = ny;
+            z = nz;
+            vx *= 0.99;
+            vy = vy * 0.99 - 0.03;
+            vz *= 0.99;
+            if (y < client.world.getBottomY() + 4) return null;
+        }
+        return null;
+    }
+
     private static void throwPearl(MinecraftClient client) {
         ClientPlayerEntity p = client.player;
         int slot = hotbarSlot(p, Items.ENDER_PEARL);
@@ -1982,8 +2079,17 @@ public final class FlightRunner {
         lastPearl = ticks;
         double dx = islandX + 0.5 - p.getX(), dz = islandZ + 0.5 - p.getZ();
         double d = Math.hypot(dx, dz);
-        p.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
-        p.setPitch(d > 45 ? -45f : -30f);
+        float[] aim = aimPearl(client, p);
+        if (aim != null) {
+            p.setYaw(aim[0]);
+            p.setPitch(aim[1]);
+            FlightRecorder.routine("PEARL_AIM safe_simulated yaw=" + aim[0] + " pitch=" + aim[1]);
+        } else {
+            // no safe landing found: still throw (a pearl is better than the void), aimed at the island by a guess
+            p.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
+            p.setPitch(d > 45 ? -45f : -30f);
+            FlightRecorder.routine("PEARL_AIM guess (no safe landing found)");
+        }
         PlayerInventory inv = p.getInventory();
         inv.setSelectedSlot(slot);
         client.interactionManager.interactItem(p, Hand.MAIN_HAND);
