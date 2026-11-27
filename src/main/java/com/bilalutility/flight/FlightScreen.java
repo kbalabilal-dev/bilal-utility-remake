@@ -6,12 +6,15 @@ import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.text.Text;
 
+import java.util.List;
+
 /** Waypoint queue, flight settings and safety settings on one scrolling page. */
 public class FlightScreen extends BilalScreen {
     private static final String[] ROUTINE_NAMES = {"Off", "Assisted", "Full auto"};
     private static final String[] HUD_NAMES = {"off", "top center", "top left", "top right"};
     private static String draftX = "";
     private static String draftZ = "";
+    private static String pasteInfo = "";
 
     public FlightScreen(Screen parent) {
         super("Auto Elytra", "Flies to your points, nearest first", 0x66CCFF, parent);
@@ -69,6 +72,13 @@ public class FlightScreen extends BilalScreen {
                 clearAndInit();
             }
         }, "Fills X and Z with where you stand");
+        y += 24;
+        button("Paste points (clipboard)", left, y, inner, this::pasteFromClipboard,
+                "Reads your clipboard and adds every point in it. One point per line. Works with: 25773, -72911  or  X: 25773 Z: -72911  or  x, y, z. Points already in the queue are skipped");
+        if (!pasteInfo.isEmpty()) {
+            label(pasteInfo, left, y + 26, 0xFF9A9AA8);
+            y += 14;
+        }
 
         // ---- queue ----
         y += 34;
@@ -218,17 +228,31 @@ public class FlightScreen extends BilalScreen {
     }
 
     private void addPoint() {
-        try {
-            int x = Integer.parseInt(draftX.trim());
-            int z = Integer.parseInt(draftZ.trim());
-            FlightConfig.waypoints.add(new FlightConfig.Waypoint("P" + (FlightConfig.waypoints.size() + 1), x, z));
-            FlightConfig.save();
-            draftX = "";
-            draftZ = "";
-            clearAndInit();
-        } catch (NumberFormatException e) {
-            if (client.player != null) client.player.sendMessage(Text.literal("Enter X and Z as whole numbers"), true);
+        List<int[]> points = FlightConfig.parsePoints(draftX.trim() + ", " + draftZ.trim());
+        if (points.size() != 1) {
+            if (client.player != null) client.player.sendMessage(Text.literal("Enter X and Z as numbers"), true);
+            return;
         }
+        FlightConfig.addPoints(points);
+        FlightConfig.save();
+        draftX = "";
+        draftZ = "";
+        clearAndInit();
+    }
+
+    private void pasteFromClipboard() {
+        String text = client.keyboard.getClipboard();
+        List<int[]> points = FlightConfig.parsePoints(text);
+        if (points.isEmpty()) {
+            pasteInfo = "No coordinates found in the clipboard";
+        } else {
+            int[] r = FlightConfig.addPoints(points);
+            FlightConfig.save();
+            pasteInfo = "Added " + r[0] + " point" + (r[0] == 1 ? "" : "s")
+                    + (r[1] > 0 ? ", " + r[1] + " already in the queue" : "")
+                    + (r[2] > 0 ? ", " + r[2] + " not added (max " + FlightConfig.MAX_POINTS + ")" : "");
+        }
+        clearAndInit();
     }
 
     @Override

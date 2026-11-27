@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Settings and the waypoint queue of the Auto Elytra module (config/bilal_flight.json). */
 public final class FlightConfig {
@@ -64,6 +66,61 @@ public final class FlightConfig {
     }
 
     private FlightConfig() {}
+
+    // ---------- paste helpers (v2.0.15) ----------
+    private static final Pattern NUMBER = Pattern.compile("-?\\d+(?:\\.\\d+)?");
+    public static final int MAX_POINTS = 300;
+
+    /**
+     * Reads X/Z points from any text, one point per line.
+     * Accepts "x, z", "x z", "X: 1 Z: 2", "x, y, z" (y is ignored) and decimals.
+     * Lines that do not have 2 or 3 numbers are skipped.
+     */
+    public static List<int[]> parsePoints(String text) {
+        List<int[]> out = new ArrayList<>();
+        if (text == null) return out;
+        for (String line : text.split("\\R")) {
+            Matcher m = NUMBER.matcher(line);
+            List<Double> nums = new ArrayList<>();
+            while (m.find() && nums.size() < 4) nums.add(Double.parseDouble(m.group()));
+            double x, z;
+            if (nums.size() == 2) {
+                x = nums.get(0);
+                z = nums.get(1);
+            } else if (nums.size() == 3) {
+                x = nums.get(0);
+                z = nums.get(2);
+            } else {
+                continue;
+            }
+            if (Math.abs(x) > 30000000 || Math.abs(z) > 30000000) continue;
+            out.add(new int[]{(int) Math.floor(x), (int) Math.floor(z)});
+        }
+        return out;
+    }
+
+    /** Adds the points to the queue. Returns {added, alreadyInQueue, queueFull}. */
+    public static int[] addPoints(List<int[]> points) {
+        int added = 0, duplicates = 0, full = 0;
+        for (int[] p : points) {
+            boolean dup = false;
+            for (Waypoint w : waypoints) {
+                if (Math.abs(w.x - p[0]) <= 2 && Math.abs(w.z - p[1]) <= 2) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) {
+                duplicates++;
+            } else if (waypoints.size() >= MAX_POINTS) {
+                full++;
+            } else {
+                waypoints.add(new Waypoint("P" + (waypoints.size() + 1), p[0], p[1]));
+                added++;
+            }
+        }
+        return new int[]{added, duplicates, full};
+    }
 
     private static Path file() {
         return FabricLoader.getInstance().getConfigDir().resolve("bilal_flight.json");
