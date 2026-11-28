@@ -51,6 +51,19 @@ public final class HotSpots {
             return Math.hypot(mx * 16 + 8, mz * 16 + 8) < HuntConfig.d.ignoreSpawn;
         }
 
+        /** Near the X axis, the Z axis or a diagonal: the roads players fly out on. */
+        public boolean onHighway() {
+            if (!HuntConfig.d.ignoreHighways) return false;
+            double x = mx * 16 + 8, z = mz * 16 + 8;
+            double w = HuntConfig.d.highwayWidth;
+            double diag = Math.min(Math.abs(x - z), Math.abs(x + z)) / Math.sqrt(2);
+            return Math.abs(z) < w || Math.abs(x) < w || diag < w;
+        }
+
+        public boolean ignored() {
+            return nearSpawn() || onHighway();
+        }
+
         public boolean isTrail() {
             return len >= HuntConfig.d.minTrail && elong >= HuntConfig.d.trailShape / 10.0;
         }
@@ -97,7 +110,7 @@ public final class HotSpots {
     public static List<Spot> spots(List<Cluster> clusters) {
         List<Spot> out = new ArrayList<>();
         for (Cluster c : clusters) {
-            if (c.n < HuntConfig.d.minCluster || c.isTrail() || c.nearSpawn()) continue;
+            if (c.n < HuntConfig.d.minCluster || c.isTrail() || c.ignored()) continue;
             out.add(new Spot((int) Math.round(c.mx) * 16 + 8, (int) Math.round(c.mz) * 16 + 8, c.n));
         }
         out.sort((a, b) -> Integer.compare(b.size, a.size));

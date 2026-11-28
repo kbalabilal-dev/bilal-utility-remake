@@ -6,11 +6,11 @@ import net.minecraft.world.World;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 
-/** Looks at every chunk the server sends (Overworld and Nether only) and records whether it was new or old on arrival. */
+/** Looks at every chunk the server sends (Overworld and Nether only): new or old, sus score, portals. */
 public final class HuntDetector {
     private HuntDetector() {}
 
-    public static int classifiedNew, classifiedOld, unreadable;
+    public static int classifiedNew, classifiedOld, classifiedUnknown;
 
     public static boolean supported(ClientWorld world) {
         return world.getRegistryKey() == World.OVERWORLD || world.getRegistryKey() == World.NETHER;
@@ -25,19 +25,27 @@ public final class HuntDetector {
         String dim = dim(world);
         int cx = chunk.getPos().getStartX() >> 4;
         int cz = chunk.getPos().getStartZ() >> 4;
+        long key = ChunkStore.key(cx, cz);
 
         scanPortals(dim, chunk);
 
-        if (!HuntConfig.d.detect) return;
-        if (ChunkStore.map(dim).containsKey(ChunkStore.key(cx, cz))) return; // first look wins
+        boolean known = ChunkStore.map(dim).containsKey(key);
+        boolean wantClassify = HuntConfig.d.detect && !known;
+        boolean wantSus = HuntConfig.d.sus && SusScanner.firstTime(dim, key);
+        if (!wantClassify && !wantSus) return; // first look wins for old/new, and sus is scanned once per session
 
-        ChunkProbe.Features f = ChunkProbe.probe(chunk);
-        if (f.informative == 0) { unreadable++; return; } // nothing readable, do not guess
-        boolean isNew = HuntCalibration.ruleSaysNew(HuntConfig.d.rule, f);
-        if (ChunkStore.put(dim, cx, cz, isNew ? ChunkStore.NEW : ChunkStore.OLD)) {
-            if (isNew) classifiedNew++; else classifiedOld++;
-            HuntState.markDirty();
+        ChunkProbe.Features f = ChunkProbe.probe(chunk, world.getRegistryKey() == World.NETHER);
+
+        if (wantClassify) {
+            byte v = HuntClassifier.verdict(HuntConfig.d.rule, f);
+            if (ChunkStore.put(dim, cx, cz, v)) {
+                if (v == ChunkStore.NEW) classifiedNew++;
+                else if (v == ChunkStore.OLD) classifiedOld++;
+                else classifiedUnknown++;
+                HuntState.markDirty();
+            }
         }
+        if (wantSus) SusScanner.scan(dim, chunk, f);
     }
 
     /** Nether portal blocks are placed by players, so every one found is logged and remembered. */

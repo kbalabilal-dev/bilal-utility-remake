@@ -4,6 +4,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ServerInfo;
 import net.minecraft.client.world.ClientWorld;
+import net.minecraft.world.World;
 import net.minecraft.world.chunk.WorldChunk;
 
 import java.io.IOException;
@@ -12,12 +13,12 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Predicate;
 
 /**
  * Learn mode. You tell it "the chunks that load now are NEW" (flying into ground nobody has touched)
- * or "OLD" (your own base, places you have been), and it records the palette numbers for each chunk.
- * /bhunt report then shows how well each candidate rule separates the two on THIS server.
+ * or "OLD" (your own base, places you have been), and it records the palette numbers of each chunk.
+ * /bhunt report then shows how well every set of signals separates the two on THIS server, and
+ * /bhunt tune picks the thresholds that score best.
  */
 public final class HuntCalibration {
     private HuntCalibration() {}
@@ -50,7 +51,8 @@ public final class HuntCalibration {
 
     public static void onChunk(ClientWorld world, WorldChunk chunk) {
         if (learnNew == null || !HuntDetector.supported(world)) return;
-        ChunkProbe.Features f = ChunkProbe.probe(chunk);
+        ChunkProbe.Features f = ChunkProbe.probe(chunk, world.getRegistryKey() == World.NETHER);
+        f.data.clear(); // samples only need the numbers, not the raw sections
         int cx = chunk.getPos().getStartX() >> 4;
         int cz = chunk.getPos().getStartZ() >> 4;
         samples.add(new Sample(learnNew, world.getRegistryKey().getValue().toString(), cx, cz, f));
@@ -71,7 +73,7 @@ public final class HuntCalibration {
             Files.createDirectories(p.getParent());
             boolean fresh = Files.notExists(p);
             StringBuilder sb = new StringBuilder();
-            if (fresh) sb.append("label,dimension,cx,cz,sections,informative,nonCanonical,unusedSections,airFirst,skipped,firstPalette\n");
+            if (fresh) sb.append(ChunkProbe.CSV_HEADER).append('\n');
             for (int i = flushed; i < samples.size(); i++) {
                 Sample s = samples.get(i);
                 sb.append(s.isNew ? "new" : "old").append(',').append(s.dim).append(',')
@@ -86,55 +88,78 @@ public final class HuntCalibration {
         }
     }
 
-    private static final class Rule {
-        final String name;
-        final Predicate<ChunkProbe.Features> saysNew;
-        Rule(String name, Predicate<ChunkProbe.Features> saysNew) { this.name = name; this.saysNew = saysNew; }
-    }
-
-    private static final List<Rule> RULES = List.of(
-            new Rule("any section out of order", f -> f.nonCanonical > 0),
-            new Rule("half the sections out of order", f -> f.informative > 0 && f.nonCanonical * 2 >= f.informative),
-            new Rule("any unused palette entries", f -> f.unusedSections > 0),
-            new Rule("air first in most sections", f -> f.sections > 0 && f.airFirst * 2 > f.sections)
-    );
-
-    public static boolean ruleSaysNew(int index, ChunkProbe.Features f) {
-        return RULES.get(Math.max(0, Math.min(RULES.size() - 1, index))).saysNew.test(f);
-    }
-
     public static String ruleName(int index) {
-        return RULES.get(Math.max(0, Math.min(RULES.size() - 1, index))).name;
+        return HuntClassifier.NAMES[Math.max(0, Math.min(HuntClassifier.NAMES.length - 1, index))];
     }
 
-    public static int ruleCount() { return RULES.size(); }
+    public static int ruleCount() { return HuntClassifier.NAMES.length; }
+
+    /** Per-class results for one set of signals: [right on new, right on old, unknown on new, unknown on old]. */
+    private static double[] score(int mode, int bioThr, int blkThr, int nNew, int nOld) {
+        int newRight = 0, oldRight = 0, newUnk = 0, oldUnk = 0;
+        for (Sample s : samples) {
+            byte v = HuntClassifier.verdict(mode, s.f, bioThr, blkThr);
+            if (v == HuntClassifier.UNKNOWN) { if (s.isNew) newUnk++; else oldUnk++; }
+            else if (s.isNew && v == HuntClassifier.NEW) newRight++;
+            else if (!s.isNew && v == HuntClassifier.OLD) oldRight++;
+        }
+        return new double[]{100.0 * newRight / nNew, 100.0 * oldRight / nOld, 100.0 * newUnk / nNew, 100.0 * oldUnk / nOld};
+    }
 
     public static List<String> report() {
         List<String> out = new ArrayList<>();
-        int nNew = 0, nOld = 0, blindNew = 0, blindOld = 0;
-        for (Sample s : samples) {
-            boolean blind = s.f.informative == 0;
-            if (s.isNew) { nNew++; if (blind) blindNew++; } else { nOld++; if (blind) blindOld++; }
-        }
+        int nNew = 0, nOld = 0;
+        for (Sample s : samples) { if (s.isNew) nNew++; else nOld++; }
         HuntLog.line("CALIB", "report requested, new=" + nNew + " old=" + nOld);
-        out.add("Samples: " + nNew + " NEW, " + nOld + " OLD (no readable sections: " + blindNew + " new, " + blindOld + " old)");
+        out.add("Samples: " + nNew + " NEW, " + nOld + " OLD");
         if (nNew == 0 || nOld == 0) {
             out.add("Collect both kinds first: /bhunt learn new  (fresh ground) and /bhunt learn old  (your base area).");
             return out;
         }
-        for (Rule r : RULES) {
-            int newHit = 0, oldWrong = 0;
-            for (Sample s : samples) {
-                boolean says = r.saysNew.test(s.f);
-                if (s.isNew && says) newHit++;
-                if (!s.isNew && says) oldWrong++;
-            }
-            String res = String.format("%s: finds %.1f%% of new, calls %.1f%% of old chunks new by mistake",
-                    r.name, 100.0 * newHit / nNew, 100.0 * oldWrong / nOld);
+        out.add("Each line: how often it is right on new chunks / right on old chunks / unsure. Wrong answers are what is left over.");
+        for (int mode = 0; mode < HuntClassifier.NAMES.length; mode++) {
+            double[] r = score(mode, HuntConfig.d.bioThreshold, HuntConfig.d.blkThreshold, nNew, nOld);
+            String res = String.format("%d. %s: new %.1f%%, old %.1f%%, unsure %.1f%% / %.1f%%",
+                    mode + 1, HuntClassifier.NAMES[mode], r[0], r[1], r[2], r[3]);
             HuntLog.line("CALIB", res);
             out.add(res);
         }
-        out.add("A good rule finds almost all new chunks and calls almost no old ones new.");
+        out.add("Good = both numbers near 100. Try /bhunt tune to pick the best thresholds, then /bhunt rule <number>.");
+        return out;
+    }
+
+    /** Tries every threshold pair on the samples, keeps the best one for the rule in use, and says what it did. */
+    public static List<String> tune() {
+        List<String> out = new ArrayList<>();
+        int nNew = 0, nOld = 0;
+        for (Sample s : samples) { if (s.isNew) nNew++; else nOld++; }
+        if (nNew < 20 || nOld < 20) {
+            out.add("Need at least 20 NEW and 20 OLD samples first (have " + nNew + " and " + nOld + ").");
+            return out;
+        }
+        int mode = HuntConfig.d.rule;
+        int bestBio = HuntConfig.d.bioThreshold, bestBlk = HuntConfig.d.blkThreshold;
+        double best = -1;
+        for (int bio = 1; bio <= 4; bio++) {
+            for (int blk = 1; blk <= 8; blk++) {
+                double[] r = score(mode, bio, blk, nNew, nOld);
+                // wrong answers cost 1, unsure answers cost half, so the balanced score is 1 - mistakes
+                double wrongNew = 100 - r[0] - r[2], wrongOld = 100 - r[1] - r[3];
+                double value = 100 - (wrongNew + wrongOld) / 2.0 - (r[2] + r[3]) / 4.0;
+                boolean better = value > best + 1e-9
+                        || (Math.abs(value - best) < 1e-9 && bio == 1 && blk == 3);
+                if (better) { best = value; bestBio = bio; bestBlk = blk; }
+            }
+        }
+        HuntConfig.d.bioThreshold = bestBio;
+        HuntConfig.d.blkThreshold = bestBlk;
+        HuntConfig.save();
+        double[] r = score(mode, bestBio, bestBlk, nNew, nOld);
+        String msg = String.format("Rule %d with biome threshold %d and block threshold %d: new %.1f%%, old %.1f%%, unsure %.1f%% / %.1f%%",
+                mode + 1, bestBio, bestBlk, r[0], r[1], r[2], r[3]);
+        HuntLog.line("CALIB", "tuned: " + msg);
+        out.add("Saved the best thresholds for the rule you use.");
+        out.add(msg);
         return out;
     }
 }

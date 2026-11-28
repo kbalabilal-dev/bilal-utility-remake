@@ -28,14 +28,33 @@ public class HuntScreen extends BilalScreen {
                 v -> HuntConfig.d.rule = v, HuntCalibration::ruleName, HuntConfig::save,
                 "Which signal calls a chunk new. Pick the one /bhunt report scores best on your server");
         y += 24;
-        toggle(left, y, inner, "Write logs", () -> HuntConfig.d.logs, v -> HuntConfig.d.logs = v,
+        stepper(y, "Biome signals needed", () -> HuntConfig.d.bioThreshold, v -> HuntConfig.d.bioThreshold = v,
+                1, 8, 1, 2, v -> String.valueOf(v), HuntConfig::save,
+                "Sections whose biome palette still holds plains from generation before a chunk is called new");
+        y += 24;
+        stepper(y, "Block signals needed", () -> HuntConfig.d.blkThreshold, v -> HuntConfig.d.blkThreshold = v,
+                1, 10, 1, 2, v -> String.valueOf(v), HuntConfig::save,
+                "Block palette sections that must look unsaved before a chunk is called new (3 is the usual value)");
+        y += 24;
+        button("Tune thresholds from my samples", left, y, inner, () -> {
+            if (client.player != null) for (String line : HuntCalibration.tune()) client.player.sendMessage(Text.literal(line), false);
+        }, "Needs samples from /bhunt learn new and /bhunt learn old. Picks the thresholds that score best");
+        y += 24;
+        toggle(left, y, half, "Sus chunks", () -> HuntConfig.d.sus, v -> HuntConfig.d.sus = v,
+                HuntConfig::save, "Scores chunks that look built in (blocks that never generate, storage, item frames) and shows them orange");
+        toggle(left + half + 4, y, half, "Write logs", () -> HuntConfig.d.logs, v -> HuntConfig.d.logs = v,
                 HuntConfig::save, "One text file per session in .minecraft/bilal_hunt_logs (no chat, no names, no server address)");
+        y += 24;
+        stepper(y, "Sus score needed", () -> HuntConfig.d.susThreshold, v -> HuntConfig.d.susThreshold = v,
+                5, 200, 1, 5, v -> String.valueOf(v), HuntConfig::save,
+                "Lower finds more (and more false alarms). One never-natural block scores about 12, a shulker box 10, blocks above the Nether roof 40");
         y += 24;
         dynamic(() -> {
             if (client.world == null) return "Join a world to see counts";
             if (!HuntDetector.supported(client.world)) return "The End is not tracked";
             String dim = HuntDetector.dim(client.world);
-            return "This dimension: " + ChunkStore.count(dim, ChunkStore.OLD) + " old, " + ChunkStore.count(dim, ChunkStore.NEW) + " new";
+            return "This dimension: " + ChunkStore.count(dim, ChunkStore.OLD) + " old, " + ChunkStore.count(dim, ChunkStore.NEW)
+                    + " new, " + SusStore.count(dim) + " sus";
         }, left, y + 2, inner, 0xFFCCCCCC);
 
         y += 20;
@@ -52,6 +71,13 @@ public class HuntScreen extends BilalScreen {
         y += 24;
         stepper(y, "Ignore around 0,0", () -> HuntConfig.d.ignoreSpawn, v -> HuntConfig.d.ignoreSpawn = v,
                 0, 100000, 500, 5000, v -> v + " blocks", HuntConfig::save, "Old chunks this close to spawn are just traffic");
+        y += 24;
+        toggle(left, y, inner, "Ignore highways", () -> HuntConfig.d.ignoreHighways, v -> HuntConfig.d.ignoreHighways = v,
+                () -> { HuntConfig.save(); HuntState.markDirty(); }, "Skips old chunks along the X axis, Z axis and both diagonals, where players fly out");
+        y += 24;
+        stepper(y, "Highway width", () -> HuntConfig.d.highwayWidth, v -> HuntConfig.d.highwayWidth = v,
+                16, 2000, 16, 128, v -> v + " blocks", () -> { HuntConfig.save(); HuntState.markDirty(); },
+                "How far either side of a highway line still counts as the highway");
         y += 24;
         stepper(y, "Radar size", () -> HuntConfig.d.radarRadius, v -> HuntConfig.d.radarRadius = v,
                 8, 64, 4, 8, v -> v + " chunks", HuntConfig::save, "How far around you the radar shows");

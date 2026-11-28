@@ -22,7 +22,7 @@ import java.util.Set;
 public final class ChunkStore {
     private ChunkStore() {}
 
-    public static final byte NEW = 1, OLD = 2;
+    public static final byte NEW = 1, OLD = 2, UNK = 3; // UNK = looked at it, could not tell
 
     private static final Map<String, Map<Long, Byte>> maps = new HashMap<>();
     private static final Set<String> loaded = new HashSet<>();
@@ -57,8 +57,9 @@ public final class ChunkStore {
                         String[] a = line.split(",");
                         if (a.length != 3) continue;
                         try {
+                            String st = a[2].trim();
                             m.put(key(Integer.parseInt(a[0].trim()), Integer.parseInt(a[1].trim())),
-                                    a[2].trim().equals("N") ? NEW : OLD);
+                                    st.equals("N") ? NEW : st.equals("U") ? UNK : OLD);
                         } catch (NumberFormatException ignored) {
                         }
                     }
@@ -74,7 +75,7 @@ public final class ChunkStore {
         Map<Long, Byte> m = map(dim);
         if (m.putIfAbsent(key(cx, cz), state) != null) return false;
         pending.computeIfAbsent(dim, k -> new StringBuilder())
-                .append(cx).append(',').append(cz).append(',').append(state == NEW ? 'N' : 'O').append('\n');
+                .append(cx).append(',').append(cz).append(',').append(state == NEW ? 'N' : state == UNK ? 'U' : 'O').append('\n');
         return true;
     }
 

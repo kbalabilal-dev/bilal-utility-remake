@@ -6,6 +6,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientEntityEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
@@ -40,15 +41,19 @@ public class HuntClient implements ClientModInitializer {
         });
         ClientTickEvents.END_CLIENT_TICK.register(c -> {
             ChunkStore.tick();
+            SusStore.tick();
             HuntLog.tick();
             HuntState.tick(c);
         });
+        ClientEntityEvents.ENTITY_LOAD.register(SusScanner::onEntity);
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) ->
                 HuntLog.line("SESSION", "join, minecraft " + modVersion("minecraft") + ", bilal_utility " + modVersion("bilal_utility")
                         + ", rule " + (HuntConfig.d.rule + 1) + ", detector " + (HuntConfig.d.detect ? "on" : "off")));
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             ChunkStore.flush();
-            HuntLog.line("SESSION", "disconnect, classified this session: new " + HuntDetector.classifiedNew + ", old " + HuntDetector.classifiedOld);
+            SusStore.flush();
+            SusScanner.resetSession();
+            HuntLog.line("SESSION", "disconnect, classified this session: new " + HuntDetector.classifiedNew + ", old " + HuntDetector.classifiedOld + ", unsure " + HuntDetector.classifiedUnknown);
             HuntLog.close();
         });
         HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT,
@@ -58,11 +63,12 @@ public class HuntClient implements ClientModInitializer {
                 literal("bhunt")
                         .then(literal("help").executes(c -> {
                             say(c.getSource(), "/bhunt learn new|old|off  - calibrate on ground you know");
-                            say(c.getSource(), "/bhunt report  - which rule works on this server");
+                            say(c.getSource(), "/bhunt report  - which signals work on this server,  /bhunt tune  - pick the best thresholds");
                             say(c.getSource(), "/bhunt rule <1-" + HuntCalibration.ruleCount() + ">  - choose the rule the detector uses");
                             say(c.getSource(), "/bhunt on|off  and  /bhunt radar on|off");
                             say(c.getSource(), "/bhunt trails  - rows of old chunks with both ends (open = go there)");
                             say(c.getSource(), "/bhunt spots  - compact patches of old chunks (possible bases)");
+                            say(c.getSource(), "/bhunt sus  - chunks that look built in (orange on the radar), best first");
                             say(c.getSource(), "/bhunt portals  - nether portals seen, with the other dimension's coordinates");
                             say(c.getSource(), "/bhunt portal <x> <z>  - nether coordinates to overworld (x8)");
                             say(c.getSource(), "/bhunt log  - where the log file is,  /bhunt forget  - delete saved chunks of this dimension");
@@ -97,6 +103,10 @@ public class HuntClient implements ClientModInitializer {
                         .then(literal("clear").executes(c -> {
                             HuntCalibration.clear();
                             say(c.getSource(), "Calibration samples cleared (the saved CSV file is kept).");
+                            return Command.SINGLE_SUCCESS;
+                        }))
+                        .then(literal("tune").executes(c -> {
+                            for (String line : HuntCalibration.tune()) say(c.getSource(), line);
                             return Command.SINGLE_SUCCESS;
                         }))
                         .then(literal("rule").then(argument("n", IntegerArgumentType.integer(1, HuntCalibration.ruleCount())).executes(c -> {
@@ -159,6 +169,34 @@ public class HuntClient implements ClientModInitializer {
                             }
                             return Command.SINGLE_SUCCESS;
                         }))
+                        .then(literal("sus")
+                                .executes(c -> {
+                                    MinecraftClient mc = MinecraftClient.getInstance();
+                                    if (mc.player == null || mc.world == null || !HuntDetector.supported(mc.world)) return 0;
+                                    String dim = HuntDetector.dim(mc.world);
+                                    var top = SusStore.top(dim, 10);
+                                    if (top.isEmpty()) {
+                                        say(c.getSource(), "No sus chunks yet (score " + HuntConfig.d.susThreshold + " or more). Fly over more ground, or lower the threshold.");
+                                        return Command.SINGLE_SUCCESS;
+                                    }
+                                    say(c.getSource(), SusStore.count(dim) + " sus chunks here, best first:");
+                                    int i = 0;
+                                    for (var e : top) {
+                                        int bx = ChunkStore.keyX(e.getKey()) * 16 + 8, bz = ChunkStore.keyZ(e.getKey()) * 16 + 8;
+                                        Byte st = ChunkStore.map(dim).get(e.getKey());
+                                        say(c.getSource(), (++i) + ". " + bx + ", " + bz + "  score " + e.getValue().total()
+                                                + (st == null ? "" : st == ChunkStore.OLD ? " (old chunk)" : " (new chunk)")
+                                                + "  " + e.getValue().reasons + "  " + Math.round(Math.hypot(bx - mc.player.getX(), bz - mc.player.getZ())) + " blocks away");
+                                    }
+                                    return Command.SINGLE_SUCCESS;
+                                })
+                                .then(literal("clear").executes(c -> {
+                                    MinecraftClient mc = MinecraftClient.getInstance();
+                                    if (mc.world == null || !HuntDetector.supported(mc.world)) return 0;
+                                    SusStore.forget(HuntDetector.dim(mc.world));
+                                    say(c.getSource(), "Sus chunks of this dimension cleared.");
+                                    return Command.SINGLE_SUCCESS;
+                                })))
                         .then(literal("portals").executes(c -> {
                             List<PortalStore.Portal> all = PortalStore.all();
                             if (all.isEmpty()) {

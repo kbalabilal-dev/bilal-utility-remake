@@ -29,10 +29,20 @@ public final class RadarHud {
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
                 Byte s = m.get(ChunkStore.key(pcx + dx, pcz + dz));
-                if (s == null) continue;
+                if (s == null || s == ChunkStore.UNK) continue;
                 int px = x0 + (dx + r) * cell;
                 int pz = y0 + (dz + r) * cell;
                 ctx.fill(px, pz, px + cell, pz + cell, s == ChunkStore.OLD ? 0xCC33DD55 : 0xCCDD3333);
+            }
+        }
+        if (HuntConfig.d.sus) {
+            for (Map.Entry<Long, SusStore.Entry> e : SusStore.map(dim).entrySet()) {
+                if (e.getValue().total() < HuntConfig.d.susThreshold) continue;
+                int dx = ChunkStore.keyX(e.getKey()) - pcx, dz = ChunkStore.keyZ(e.getKey()) - pcz;
+                if (Math.abs(dx) > r || Math.abs(dz) > r) continue;
+                int px = x0 + (dx + r) * cell;
+                int pz = y0 + (dz + r) * cell;
+                ctx.fill(px, pz, px + cell, pz + cell, 0xFFFF9900);
             }
         }
         for (HotSpots.Spot s : HuntState.spots) mark(ctx, x0, y0, r, cell, (s.x >> 4) - pcx, (s.z >> 4) - pcz, 0xFFFFDD33);
@@ -43,7 +53,8 @@ public final class RadarHud {
         int mid = x0 + r * cell;
         ctx.fill(mid - 1, y0 + r * cell - 1, mid + 3, y0 + r * cell + 3, 0xFFFFFFFF);
 
-        String line1 = "old " + ChunkStore.count(dim, ChunkStore.OLD) + "  patches " + HuntState.spots.size() + "  trails " + HuntState.trails.size();
+        String line1 = "old " + ChunkStore.count(dim, ChunkStore.OLD) + "  patches " + HuntState.spots.size()
+                + "  trails " + HuntState.trails.size() + "  sus " + SusStore.count(dim);
         ctx.drawTextWithShadow(mc.textRenderer, line1, x0, y0 + size + 4, 0xFFFFFFFF);
         if (!HuntState.trails.isEmpty()) {
             ctx.drawTextWithShadow(mc.textRenderer, HuntState.nearestTrailText(mc), Math.max(4, x0 - 160), y0 + size + 16, 0xFF33DDFF);

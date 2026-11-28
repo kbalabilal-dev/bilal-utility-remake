@@ -84,13 +84,15 @@ public final class HuntState {
         HuntLog.line("SUMMARY", d + " stored old=" + ChunkStore.count(d, ChunkStore.OLD) + " new=" + ChunkStore.count(d, ChunkStore.NEW)
                 + " | last minute: +" + (nNew - lastNew) + " new, +" + (nOld - lastOld) + " old"
                 + " | patches=" + spots.size() + " trails=" + trails.size()
-                + " | unreadable chunks=" + HuntDetector.unreadable);
+                + " | this session: " + HuntDetector.classifiedNew + " new, " + HuntDetector.classifiedOld + " old, "
+                + HuntDetector.classifiedUnknown + " unsure");
         lastNew = nNew;
         lastOld = nOld;
         HuntLog.line("DIAG", "chunks probed=" + ChunkProbe.probed + " sections read=" + ChunkProbe.sectionsRead
                 + " skipped=" + ChunkProbe.sectionsSkipped + " globalPalette=" + ChunkProbe.globalPalette
                 + " lengthPrefix=" + ChunkProbe.withLengthPrefix + " noPrefix=" + ChunkProbe.withoutLengthPrefix
-                + " errors=" + ChunkProbe.errors + " rule=" + (HuntConfig.d.rule + 1));
+                + " errors=" + ChunkProbe.errors + " rule=" + (HuntConfig.d.rule + 1)
+                + " bioThr=" + HuntConfig.d.bioThreshold + " blkThr=" + HuntConfig.d.blkThreshold);
     }
 
     /** One line about the closest trail, for the radar and the screen. */

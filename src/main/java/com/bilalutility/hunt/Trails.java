@@ -51,7 +51,7 @@ public final class Trails {
         Map<Long, Byte> m = ChunkStore.map(dim);
         List<Trail> out = new ArrayList<>();
         for (HotSpots.Cluster c : clusters) {
-            if (!c.isTrail() || c.nearSpawn()) continue;
+            if (!c.isTrail() || c.ignored()) continue;
             Trail t = new Trail();
             t.n = c.n;
             t.len = c.len;
