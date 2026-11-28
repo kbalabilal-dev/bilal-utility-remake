@@ -3,7 +3,7 @@
   "id": "bilal_utility",
   "version": "${version}",
   "name": "Bilal Utility",
-  "description": "Client-side utility pack: Anchor Macro, Auto Regear, TPAHere, Auto Elytra and HUD.",
+  "description": "Client-side utility pack: Anchor Macro, Auto Regear, TPAHere, Auto Elytra, Base Hunting and HUD.",
   "icon": "assets/bilal_utility/icon.png",
   "environment": "client",
   "entrypoints": {
@@ -12,7 +12,8 @@
       "com.bilalutility.regear.RegearClient",
       "com.bilalutility.tpa.TpaHereClient",
       "com.bilalutility.hud.HudClient",
-      "com.bilalutility.flight.FlightClient"
+      "com.bilalutility.flight.FlightClient",
+      "com.bilalutility.hunt.HuntClient"
     ],
     "modmenu": [
       "com.bilalutility.BilalModMenu"

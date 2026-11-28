@@ -59,6 +59,11 @@ public class BilalHubScreen extends BilalScreen {
                 FlightRunner::label,
                 () -> client.setScreen(new FlightScreen(this)));
 
+        y += ROW_H + 4;
+        add(left, y, w, Items.SPYGLASS, "Base Hunting",
+                () -> com.bilalutility.hunt.HuntConfig.d.detect ? "Detector on" : "Detector off",
+                () -> client.setScreen(new com.bilalutility.hunt.HuntScreen(this)));
+
         y += ROW_H + 8;
         button("Menu style: " + (com.bilalutility.ui.UiStyle.classic ? "Classic" : "Modern"), left, y, w, () -> {
             com.bilalutility.ui.UiStyle.toggle();
